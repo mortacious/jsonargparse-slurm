@@ -9,14 +9,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import yaml
+from jsonargparse import auto_parser
 
 from jsonargparse_slurm.cli import (
-    _split_args,
-    _parse_wrapper_args,
-    _apply_deployment_overrides,
-    _build_deployment_config,
-    _extract_config_path,
-    _has_print_config,
+    setup_cluster,
+    split_by_signature,
+    _filter_parser_args,
     _build_repo_setup_script,
     _build_env_exports,
     _build_container_script,
@@ -35,32 +34,31 @@ from jsonargparse_slurm.config_schema import (
 
 
 def _sample_yaml():
+    """YAML with top-level wrapper keys slurm/container (no deployment wrapper)."""
     return {
+        "slurm": {
+            "job_name": "train_job",
+            "partition": "gpu",
+            "time": "0-08:00:00",
+            "nodes": 1,
+            "ntasks": 1,
+            "gpus_per_task": 2,
+            "cpus_per_task": 32,
+            "mem": "128G",
+            "gpu_bind": "none",
+        },
+        "container": {
+            "image": "nvcr.io/nvidia/pytorch:23.10-py3",
+            "mounts": ["/data:/data"],
+            "env": {"WANDB_API_KEY": "test123"},
+            "mount_netrc": False,
+        },
         "training": {
             "lr": 0.001,
             "epochs": 100,
         },
         "data": {
             "path": "/data/dataset",
-        },
-        "deployment": {
-            "slurm": {
-                "job_name": "train_job",
-                "partition": "gpu",
-                "time": "0-08:00:00",
-                "nodes": 1,
-                "ntasks": 1,
-                "gpus_per_task": 2,
-                "cpus_per_task": 32,
-                "mem": "128G",
-                "gpu_bind": "none",
-            },
-            "container": {
-                "image": "nvcr.io/nvidia/pytorch:23.10-py3",
-                "mounts": ["/data:/data"],
-                "env": {"WANDB_API_KEY": "test123"},
-                "mount_netrc": False,
-            },
         },
     }
 
@@ -87,212 +85,117 @@ def _sample_deployment_config():
     )
 
 
-class TestSplitArgs:
-    """Tests for _split_args."""
+class TestSetupCluster:
+    """Tests for setup_cluster."""
 
-    def test_separates_wrapper_from_target(self):
-        wrapper, target = _split_args([
-            "jsap-slurm",
-            "--config", "config.yaml",
-            "python", "train.py",
-        ])
-        assert "--config" in wrapper
-        assert "config.yaml" in wrapper
-        assert target == ["python", "train.py"]
+    def test_returns_deployment_config(self):
+        result = setup_cluster(
+            slurm=SlurmConfig(job_name="test"),
+            container=ContainerConfig(image="img"),
+        )
+        assert isinstance(result, DeploymentConfig)
+        assert result.slurm.job_name == "test"
+        assert result.container.image == "img"
 
-    def test_handles_print_config(self):
-        wrapper, target = _split_args([
-            "jsap-slurm",
-            "--print_config",
-            "--config", "config.yaml",
-            "python", "train.py",
-            "--integrator.min_points", "10",
-        ])
-        assert "--print_config" in wrapper
-        assert "--config" in wrapper
-        assert "python" in target
-        assert "--integrator.min_points" in target
-        assert "10" in target
 
-    def test_handles_deployment_overrides(self):
-        wrapper, target = _split_args([
-            "jsap-slurm",
-            "--deployment.slurm.job_name", "myjob",
-            "--deployment.slurm.partition", "gpu",
-            "--config", "config.yaml",
-            "python", "train.py",
-        ])
-        assert "--deployment.slurm.job_name" in wrapper
-        assert "myjob" in wrapper
-        assert "--deployment.slurm.partition" in wrapper
-        assert "gpu" in wrapper
-        assert target == ["python", "train.py"]
+class TestSplitBySignature:
+    """Tests for split_by_signature."""
+
+    def _parser(self):
+        return auto_parser(setup_cluster, description="test")
+
+    def test_splits_yaml_keys(self):
+        parser = self._parser()
+        raw_yaml = _sample_yaml()
+        w_args, t_args, w_yaml, t_yaml = split_by_signature(
+            parser, [], raw_yaml
+        )
+        assert "slurm" in w_yaml
+        assert "container" in w_yaml
+        assert "training" in t_yaml
+        assert "data" in t_yaml
+        assert "slurm" not in t_yaml
+        assert "container" not in t_yaml
+
+    def test_splits_cli_args(self):
+        parser = self._parser()
+        w_args, t_args, w_yaml, t_yaml = split_by_signature(
+            parser,
+            [
+                "--slurm.job_name", "myjob",
+                "--config", "config.yaml",
+                "python", "train.py",
+                "--integrator.min_points", "10",
+            ],
+            {},
+        )
+        assert "--slurm.job_name" in w_args
+        assert "--config" in w_args
+        assert "config.yaml" in w_args
+        assert w_args == [
+            "--slurm.job_name", "myjob", "--config", "config.yaml",
+        ]
+        assert t_args == ["python", "train.py", "--integrator.min_points", "10"]
 
     def test_handles_deployment_equals_form(self):
-        wrapper, target = _split_args([
-            "jsap-slurm",
-            "--deployment.slurm.job_name=myjob",
-            "--config", "config.yaml",
-            "python", "train.py",
-        ])
-        assert "--deployment.slurm.job_name=myjob" in wrapper
-        assert target == ["python", "train.py"]
+        parser = self._parser()
+        w_args, t_args, _, _ = split_by_signature(
+            parser,
+            ["--slurm.job_name=myjob", "python", "train.py"],
+            {},
+        )
+        assert "--slurm.job_name=myjob" in w_args
+        assert t_args == ["python", "train.py"]
 
-    def test_target_only_args(self):
-        wrapper, target = _split_args([
-            "jsap-slurm",
-            "--config", "config.yaml",
-            "python", "train.py",
-            "--integrator.min_points", "10",
-            "--model.arch", "resnet50",
-        ])
-        assert "--integrator.min_points" in target
-        assert "--model.arch" in target
-        assert "10" in target
+    def test_print_config_in_wrapper_args(self):
+        parser = self._parser()
+        w_args, t_args, _, _ = split_by_signature(
+            parser,
+            ["--print_config", "--config", "config.yaml", "python", "train.py"],
+            {},
+        )
+        assert "--print_config" in w_args
+        assert "--config" in w_args
+        assert t_args == ["python", "train.py"]
+
+    def test_empty_yaml(self):
+        parser = self._parser()
+        w_args, t_args, w_yaml, t_yaml = split_by_signature(
+            parser, [], {}
+        )
+        assert w_yaml == {}
+        assert t_yaml == {}
 
 
-class TestParseWrapperArgs:
-    """Tests for _parse_wrapper_args."""
+class TestFilterParserArgs:
+    """Tests for _filter_parser_args."""
 
-    def test_extracts_config_and_overrides(self):
-        config_path, is_print, overrides = _parse_wrapper_args([
-            "--config", "/path/to/config.yaml",
-            "--deployment.slurm.job_name", "myjob",
+    def test_removes_config_flag_and_value(self):
+        result = _filter_parser_args([
+            "--slurm.job_name", "myjob",
+            "--config", "/tmp/config.yaml",
             "--print_config",
         ])
-        assert config_path == "/path/to/config.yaml"
-        assert is_print is True
-        assert overrides == {"slurm.job_name": "myjob"}
+        assert "--config" not in result
+        assert "/tmp/config.yaml" not in result
+        assert "--print_config" not in result
+        assert result == ["--slurm.job_name", "myjob"]
 
-    def test_deployment_equals_form(self):
-        config_path, is_print, overrides = _parse_wrapper_args([
-            "--deployment.slurm.job_name=myjob",
-            "--config", "config.yaml",
+    def test_removes_short_config_flag(self):
+        result = _filter_parser_args([
+            "-c", "/tmp/config.yaml",
+            "--slurm.job_name", "myjob",
         ])
-        assert config_path == "config.yaml"
-        assert overrides == {"slurm.job_name": "myjob"}
+        assert "-c" not in result
+        assert "/tmp/config.yaml" not in result
+        assert result == ["--slurm.job_name", "myjob"]
 
-    def test_no_deployment_overrides(self):
-        config_path, is_print, overrides = _parse_wrapper_args([
-            "--config", "config.yaml",
+    def test_preserves_non_wrapper_args(self):
+        result = _filter_parser_args([
+            "--slurm.job_name", "myjob",
+            "--container.image", "img:v1",
         ])
-        assert config_path == "config.yaml"
-        assert is_print is False
-        assert overrides == {}
-
-    def test_no_print_config_flag(self):
-        config_path, is_print, overrides = _parse_wrapper_args([
-            "--config", "config.yaml",
-        ])
-        assert is_print is False
-
-
-class TestApplyDeploymentOverrides:
-    """Tests for _apply_deployment_overrides."""
-
-    def test_overrides_slurm_field(self):
-        cfg = DeploymentConfig()
-        _apply_deployment_overrides(cfg, {"slurm.job_name": "cli_job"})
-        assert cfg.slurm.job_name == "cli_job"
-
-    def test_overrides_container_field(self):
-        cfg = DeploymentConfig()
-        _apply_deployment_overrides(cfg, {"container.image": "custom:v2"})
-        assert cfg.container.image == "custom:v2"
-
-    def test_overrides_integer_field(self):
-        cfg = DeploymentConfig()
-        _apply_deployment_overrides(cfg, {"slurm.nodes": "4"})
-        assert cfg.slurm.nodes == 4
-
-    def test_overrides_bool_field(self):
-        cfg = DeploymentConfig()
-        _apply_deployment_overrides(cfg, {"container.mount_netrc": "False"})
-        assert cfg.container.mount_netrc is False
-
-    def test_multiple_overrides(self):
-        cfg = DeploymentConfig()
-        _apply_deployment_overrides(cfg, {
-            "slurm.job_name": "multi",
-            "slurm.partition": "gpu",
-            "container.image": "img:v1",
-        })
-        assert cfg.slurm.job_name == "multi"
-        assert cfg.slurm.partition == "gpu"
-        assert cfg.container.image == "img:v1"
-
-
-class TestBuildDeploymentConfig:
-    """Tests for _build_deployment_config."""
-
-    def test_constructs_from_yaml_dict(self):
-        yaml_dep = {
-            "slurm": {
-                "job_name": "yaml_job",
-                "partition": "debug",
-            },
-            "container": {
-                "image": "img:v1",
-            },
-        }
-        cfg = _build_deployment_config(yaml_dep)
-        assert cfg.slurm.job_name == "yaml_job"
-        assert cfg.slurm.partition == "debug"
-        assert cfg.slurm.nodes == 1
-        assert cfg.container.image == "img:v1"
-        assert cfg.container.mount_netrc is True
-
-    def test_repos_constructed(self):
-        yaml_dep = {
-            "repos": {
-                "main": {
-                    "url": "https://github.com/user/repo.git",
-                    "branch": "dev",
-                }
-            }
-        }
-        cfg = _build_deployment_config(yaml_dep)
-        assert "main" in cfg.repos
-        assert cfg.repos["main"].url == "https://github.com/user/repo.git"
-        assert cfg.repos["main"].branch == "dev"
-        assert cfg.repos["main"].pip_install is True
-
-
-class TestExtractConfigPath:
-    """Tests for _extract_config_path."""
-
-    def test_double_dash_config(self):
-        path = _extract_config_path(["python", "train.py", "--config", "/tmp/cfg.yaml"])
-        assert path == Path("/tmp/cfg.yaml").resolve()
-
-    def test_short_config_flag(self):
-        path = _extract_config_path(["python", "train.py", "-c", "cfg.yaml"])
-        assert path == Path("cfg.yaml").resolve()
-
-    def test_equals_form(self):
-        path = _extract_config_path(["python", "train.py", "--config=/tmp/cfg.yaml"])
-        assert path == Path("/tmp/cfg.yaml").resolve()
-
-    def test_no_config_returns_none(self):
-        path = _extract_config_path(["python", "train.py"])
-        assert path is None
-
-    def test_config_without_value_returns_none(self):
-        path = _extract_config_path(["--config"])
-        assert path is None
-
-
-class TestHasPrintConfig:
-    """Tests for _has_print_config."""
-
-    def test_detects_print_config(self):
-        assert _has_print_config(["python", "train.py", "--print_config"]) is True
-
-    def test_no_print_config(self):
-        assert _has_print_config(["python", "train.py", "--config", "cfg.yaml"]) is False
-
-    def test_empty_args(self):
-        assert _has_print_config([]) is False
+        assert result == ["--slurm.job_name", "myjob", "--container.image", "img:v1"]
 
 
 class TestBuildRepoSetupScript:
@@ -402,47 +305,39 @@ class TestResolveMounts:
     """Tests for _resolve_mounts."""
 
     def test_existing_netrc_mounted(self):
-        deploy_cfg = DeploymentConfig(
-            container=ContainerConfig(
-                mount_netrc=True,
-                netrc_host_path="/home/user/.netrc",
-                netrc_container_path="/root/.netrc",
-            ),
+        container_cfg = ContainerConfig(
+            mount_netrc=True,
+            netrc_host_path="/home/user/.netrc",
+            netrc_container_path="/root/.netrc",
         )
         with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
             with patch.object(Path, "resolve", return_value=Path("/home/user/.netrc")):
                 with patch.object(Path, "exists", return_value=True):
-                    mounts = _resolve_mounts(deploy_cfg)
+                    mounts = _resolve_mounts(container_cfg)
         assert "/home/user/.netrc:/root/.netrc" in mounts
 
     def test_netrc_not_found_warns(self):
-        deploy_cfg = DeploymentConfig(
-            container=ContainerConfig(
-                mount_netrc=True,
-                netrc_host_path="~/.netrc",
-            ),
+        container_cfg = ContainerConfig(
+            mount_netrc=True,
+            netrc_host_path="~/.netrc",
         )
         with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
             with patch.object(Path, "resolve", return_value=Path("/home/user/.netrc")):
                 with patch.object(Path, "exists", return_value=False):
-                    mounts = _resolve_mounts(deploy_cfg)
+                    mounts = _resolve_mounts(container_cfg)
         assert len(mounts) == 0
 
     def test_netrc_disabled(self):
-        deploy_cfg = DeploymentConfig(
-            container=ContainerConfig(mount_netrc=False),
-        )
-        mounts = _resolve_mounts(deploy_cfg)
+        container_cfg = ContainerConfig(mount_netrc=False)
+        mounts = _resolve_mounts(container_cfg)
         assert not any(".netrc" in m for m in mounts)
 
     def test_preserves_existing_mounts(self):
-        deploy_cfg = DeploymentConfig(
-            container=ContainerConfig(
-                mounts=["/data:/data", "/scratch:/scratch"],
-                mount_netrc=False,
-            ),
+        container_cfg = ContainerConfig(
+            mounts=["/data:/data", "/scratch:/scratch"],
+            mount_netrc=False,
         )
-        mounts = _resolve_mounts(deploy_cfg)
+        mounts = _resolve_mounts(container_cfg)
         assert "/data:/data" in mounts
         assert "/scratch:/scratch" in mounts
         assert len(mounts) == 2
@@ -619,7 +514,6 @@ class TestMain:
     """Integration tests for the main() function."""
 
     def _write_config(self, tmp_path, data):
-        import yaml
         config_path = tmp_path / "config.yaml"
         with open(config_path, "w") as f:
             yaml.dump(data, f)
@@ -631,8 +525,8 @@ class TestMain:
         with patch("sys.argv", [
             "jsap-slurm",
             "--config", config_path,
-            "--print_config",
             "python", "train.py",
+            "--print_config",
         ]):
             with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
                 result = main()
@@ -665,19 +559,8 @@ class TestMain:
         content = generated[0].read_text()
         assert "#SBATCH --job-name=train_job" in content
 
-    def test_missing_config_file_errors(self):
-        with patch("sys.argv", [
-            "jsap-slurm",
-            "--config", "/nonexistent/config.yaml",
-            "python", "train.py",
-        ]):
-            with patch.object(Path, "exists", return_value=False):
-                result = main()
-
-        assert result == 1
-
-    def test_missing_deployment_section_errors(self, tmp_path):
-        yaml_data = {"param": "value"}
+    def test_missing_wrapper_keys_in_yaml_errors(self, tmp_path):
+        yaml_data = {"training": {"lr": 0.001}}
         config_path = self._write_config(tmp_path, yaml_data)
 
         with patch("sys.argv", [
@@ -686,6 +569,19 @@ class TestMain:
             "python", "train.py",
         ]):
             result = main()
+
+        assert result == 1
+
+    def test_missing_config_file_errors(self, tmp_path):
+        config_path = str(tmp_path / "nonexistent.yaml")
+
+        with patch("sys.argv", [
+            "jsap-slurm",
+            "--config", config_path,
+            "python", "train.py",
+        ]):
+            with patch.object(Path, "exists", return_value=False):
+                result = main()
 
         assert result == 1
 
@@ -722,7 +618,30 @@ class TestMain:
             os.chdir(str(tmp_path))
             with patch("sys.argv", [
                 "jsap-slurm",
-                "--deployment.slurm.job_name", "override_job",
+                "--slurm.job_name", "override_job",
+                "--config", config_path,
+                "python", "train.py",
+            ]):
+                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                    result = main()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result == 0
+        generated = list(tmp_path.glob("logs/override_job_*.sbatch"))
+        assert len(generated) == 1
+        content = generated[0].read_text()
+        assert "#SBATCH --job-name=override_job" in content
+
+    def test_deployment_equals_form_cli_override(self, tmp_path):
+        config_path = self._write_config(tmp_path, _sample_yaml())
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("sys.argv", [
+                "jsap-slurm",
+                "--slurm.job_name=override_job",
                 "--config", config_path,
                 "python", "train.py",
             ]):
@@ -739,9 +658,9 @@ class TestMain:
 
 
 class TestYamlCleaning:
-    """Tests verifying deployment block removal from YAML."""
+    """Tests verifying wrapper keys are stripped from the target YAML."""
 
-    def test_deployment_block_stripped_from_container_script(self, tmp_path):
+    def test_wrapper_keys_stripped_from_container_script(self, tmp_path):
         target_args = ["python", "train.py"]
         deploy_cfg = _sample_deployment_config()
         clean_yaml_str = "training:\n  lr: 0.001\ndata:\n  path: /data/dataset\n"
@@ -758,7 +677,8 @@ class TestYamlCleaning:
         heredoc_start = written_sbatch.find("cat << 'EOF_CONFIG'")
         heredoc_end = written_sbatch.find("EOF_CONFIG", heredoc_start)
         heredoc_content = written_sbatch[heredoc_start:heredoc_end]
-        assert "deployment" not in heredoc_content
+        assert "slurm" not in heredoc_content
+        assert "container" not in heredoc_content
         assert "lr: 0.001" in written_sbatch
         assert "path: /data/dataset" in written_sbatch
 

@@ -9,9 +9,10 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
+from jsonargparse import auto_parser, ArgumentParser
 
 from .config_schema import (
     ContainerConfig,
@@ -21,194 +22,118 @@ from .config_schema import (
 )
 
 
-def _split_args(argv: List[str]) -> Tuple[List[str], List[str]]:
-    """Separate wrapper-level args from the target command.
+def setup_cluster(
+    slurm: SlurmConfig,
+    container: ContainerConfig,
+    repos: Dict[str, RepoConfig] = {},
+) -> DeploymentConfig:
+    """Entry-point function whose signature drives the wrapper parser.
 
     Args:
-        argv: Full command-line arguments starting with the program name.
+        slurm: SLURM resource allocation settings.
+        container: Container image and runtime settings.
+        repos: Git repositories to clone inside the container.
 
     Returns:
-        Tuple of (wrapper_args, target_args).
-        wrapper_args includes ``--config``, ``--print_config`` and any
-        ``--deployment.*`` overrides. Everything else is the target command.
+        Consolidated :class:`DeploymentConfig`.
     """
-    wrapper_args: List[str] = []
-    rest: List[str] = []
-    i = 1
-    while i < len(argv):
-        arg = argv[i]
-        if arg in ("--config", "-c"):
-            wrapper_args.append(arg)
-            if i + 1 < len(argv):
-                wrapper_args.append(argv[i + 1])
-                i += 2
-                continue
-        elif arg == "--print_config":
-            wrapper_args.append(arg)
-        elif arg.startswith("--deployment.") or arg.startswith("--deployment="):
-            wrapper_args.append(arg)
-            if "=" not in arg and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                wrapper_args.append(argv[i + 1])
-                i += 2
-                continue
-        else:
-            rest.append(arg)
-        i += 1
-    return wrapper_args, rest
-
-
-def _parse_wrapper_args(
-    wrapper_args: List[str],
-) -> Tuple[Optional[str], bool, dict]:
-    """Parse wrapper-level arguments to extract config path, print flag, and deployment overrides.
-
-    Args:
-        wrapper_args: The wrapper-level arguments extracted by :func:`_split_args`.
-
-    Returns:
-        Tuple of (config_path, is_print_config, deployment_overrides dict).
-        deployment_overrides maps dotted keys (e.g. ``slurm.job_name``) to values.
-    """
-    config_path: Optional[str] = None
-    is_print_config = False
-    deployment_overrides: dict = {}
-
-    i = 0
-    while i < len(wrapper_args):
-        arg = wrapper_args[i]
-        if arg in ("--config", "-c") and i + 1 < len(wrapper_args):
-            config_path = wrapper_args[i + 1]
-            i += 2
-            continue
-        elif arg == "--print_config":
-            is_print_config = True
-        elif arg.startswith("--deployment."):
-            key = arg[len("--deployment.") :]
-            if "=" in key:
-                key, value = key.split("=", 1)
-                deployment_overrides[key] = value
-            else:
-                i += 2
-                value = wrapper_args[i - 1]
-                deployment_overrides[key] = value
-                continue
-        elif arg.startswith("--deployment="):
-            key, value = arg[len("--deployment=") :].split("=", 1)
-            deployment_overrides[key] = value
-        i += 1
-
-    return config_path, is_print_config, deployment_overrides
-
-
-def _apply_deployment_overrides(deploy_cfg: DeploymentConfig, overrides: dict) -> None:
-    """Apply CLI deployment overrides to a DeploymentConfig instance in-place.
-
-    Supports dotted keys such as ``slurm.job_name``, ``container.image``,
-    and nested dicts like ``repos.main.url``.
-
-    Args:
-        deploy_cfg: The DeploymentConfig instance to modify.
-        overrides: Dict of dotted key -> string value pairs.
-    """
-    for key_path, value_str in overrides.items():
-        parts = key_path.split(".")
-        target: object = deploy_cfg
-        for part in parts[:-1]:
-            if isinstance(target, dict):
-                target = target[part]
-            else:
-                target = getattr(target, part)
-        field = parts[-1]
-        if isinstance(target, dict):
-            current = target.get(field)
-        else:
-            current = getattr(target, field)
-        if current is not None:
-            if isinstance(current, bool):
-                value = value_str.lower() in ("true", "1", "yes")
-            else:
-                try:
-                    value = type(current)(value_str)
-                except (ValueError, TypeError):
-                    value = value_str
-        else:
-            value = value_str
-        if isinstance(target, dict):
-            target[field] = value
-        else:
-            setattr(target, field, value)
-
-
-def _build_deployment_config(yaml_deployment: dict) -> DeploymentConfig:
-    """Construct a DeploymentConfig from a YAML deployment dict.
-
-    Args:
-        yaml_deployment: The ``deployment`` section from the YAML config.
-
-    Returns:
-        Fully populated :class:`DeploymentConfig`.
-    """
-    slurm_data = yaml_deployment.get("slurm", {})
-    slurm = SlurmConfig(**{
-        k: v for k, v in slurm_data.items()
-        if k in SlurmConfig.__dataclass_fields__
-    })
-
-    container_data = yaml_deployment.get("container", {})
-    container = ContainerConfig(**{
-        k: v for k, v in container_data.items()
-        if k in ContainerConfig.__dataclass_fields__
-    })
-
-    repos_data = yaml_deployment.get("repos", {})
-    repos = {}
-    for name, repo_data in repos_data.items():
-        repos[name] = RepoConfig(**{
-            k: v for k, v in repo_data.items()
-            if k in RepoConfig.__dataclass_fields__
-        })
-
     return DeploymentConfig(slurm=slurm, container=container, repos=repos)
 
 
-def _extract_config_path(args: List[str]) -> Optional[Path]:
-    """Extract the config file path from the given argument list.
+def split_by_signature(
+    parser: ArgumentParser,
+    cli_args: List[str],
+    raw_yaml: Dict,
+) -> Tuple[List[str], List[str], Dict, Dict]:
+    """Split CLI arguments and YAML keys by the parser's known top-level parameters.
 
-    Looks for ``--config`` or ``-c`` followed by a path value.
+    Dynamically identifies which top-level keys the parser recognizes (based on
+    the ``setup_cluster`` function signature) and separates CLI args and YAML
+    keys accordingly.
 
-    Args:
-        args: List of command-line arguments to scan.
-
-    Returns:
-        Resolved ``Path`` to the config file, or ``None`` if not found.
-    """
-    for i, arg in enumerate(args):
-        if arg in ("--config", "-c") and i + 1 < len(args):
-            return Path(args[i + 1]).resolve()
-        if arg.startswith("--config="):
-            return Path(arg.split("=", 1)[1]).resolve()
-        if arg.startswith("-c="):
-            return Path(arg[3:]).resolve()
-    return None
-
-
-def _has_print_config(args: List[str]) -> bool:
-    """Check whether ``--print_config`` appears in the argument list.
+    ``--config``, ``-c`` and ``--print_config`` are always treated as wrapper
+    arguments since they control the wrapper behaviour, not the target script.
 
     Args:
-        args: List of command-line arguments.
+        parser: The jsonargparse :class:`ArgumentParser` whose signature determines
+            which args/keys belong to the wrapper.
+        cli_args: Full CLI argument list (without the program name).
+        raw_yaml: Parsed YAML dictionary from the config file.
 
     Returns:
-        ``True`` if ``--print_config`` is present.
+        Tuple of ``(wrapper_args, target_args, wrapper_yaml, target_yaml)``.
     """
-    return "--print_config" in args
+    known_keys: set = set()
+    for action in parser._actions:
+        if action.dest and action.dest not in ("help", "config", "print_config"):
+            known_keys.add(action.dest.split(".")[0])
+
+    wrapper_yaml: Dict = {}
+    target_yaml: Dict = {}
+    for key, value in raw_yaml.items():
+        if key in known_keys:
+            wrapper_yaml[key] = value
+        else:
+            target_yaml[key] = value
+
+    wrapper_args: List[str] = []
+    target_args: List[str] = []
+    i = 0
+    while i < len(cli_args):
+        arg = cli_args[i]
+        is_wrapper_arg = False
+        for key in known_keys:
+            if arg == f"--{key}" or arg.startswith(f"--{key}."):
+                is_wrapper_arg = True
+                break
+        if arg in ("--config", "-c", "--print_config"):
+            is_wrapper_arg = True
+
+        if is_wrapper_arg:
+            wrapper_args.append(arg)
+            if "=" not in arg and i + 1 < len(cli_args) and not cli_args[i + 1].startswith("-"):
+                wrapper_args.append(cli_args[i + 1])
+                i += 1
+        else:
+            target_args.append(arg)
+        i += 1
+
+    return wrapper_args, target_args, wrapper_yaml, target_yaml
+
+
+def _filter_parser_args(wrapper_args: List[str]) -> List[str]:
+    """Remove ``--config``, ``-c`` and ``--print_config`` entries from the arg list.
+
+    These are consumed manually by the wrapper and must not be passed to the
+    jsonargparse parser again since the YAML has already been fed via
+    :meth:`set_defaults`.
+
+    Args:
+        wrapper_args: The wrapper-side arguments.
+
+    Returns:
+        Filtered argument list suitable for ``parser.parse_args()``.
+    """
+    result: List[str] = []
+    skip = False
+    for arg in wrapper_args:
+        if skip:
+            skip = False
+            continue
+        if arg in ("--config", "-c"):
+            skip = True
+            continue
+        if arg == "--print_config":
+            continue
+        result.append(arg)
+    return result
 
 
 def _build_repo_setup_script(repos: dict) -> str:
     """Generate shell commands to clone and optionally install repositories.
 
     Args:
-        repos: Mapping of repo name to :class:`RepoConfig` instances.
+        repos: Mapping of repo name to :class:`.RepoConfig` instances.
 
     Returns:
         Multi-line bash snippet for cloning and setting up repositories.
@@ -246,7 +171,7 @@ def _build_container_script(
     """Assemble the inline container bash script with Heredoc config injection.
 
     Args:
-        clean_yaml_str: The cleaned YAML content (without the deployment block).
+        clean_yaml_str: The cleaned YAML content (without wrapper keys).
         repo_setup: Shell commands for repository cloning and setup.
         target_cmd_str: Shell-escaped target command string.
 
@@ -324,21 +249,21 @@ srun -K \\
     return content, sbatch_file
 
 
-def _resolve_mounts(deploy_cfg: DeploymentConfig) -> List[str]:
+def _resolve_mounts(container_cfg: ContainerConfig) -> List[str]:
     """Resolve container mounts including the optional ``.netrc`` mount.
 
     Args:
-        deploy_cfg: The parsed deployment configuration.
+        container_cfg: The parsed container configuration.
 
     Returns:
         List of mount specifications (``host:container`` strings).
     """
-    mounts = list(deploy_cfg.container.mounts)
-    if deploy_cfg.container.mount_netrc:
-        host_netrc = Path(deploy_cfg.container.netrc_host_path).expanduser().resolve()
+    mounts = list(container_cfg.mounts)
+    if container_cfg.mount_netrc:
+        host_netrc = Path(container_cfg.netrc_host_path).expanduser().resolve()
         if host_netrc.exists():
             mounts.append(
-                f"{host_netrc}:{deploy_cfg.container.netrc_container_path}"
+                f"{host_netrc}:{container_cfg.netrc_container_path}"
             )
         else:
             print(
@@ -397,7 +322,7 @@ def _dispatch_slurm_job(
     Returns:
         Exit code (0 on success, 1 on failure).
     """
-    mounts = _resolve_mounts(deploy_cfg)
+    mounts = _resolve_mounts(deploy_cfg.container)
     mounts_str = ",".join(mounts)
 
     repo_setup = _build_repo_setup_script(deploy_cfg.repos)
@@ -427,38 +352,59 @@ def _dispatch_slurm_job(
 def main() -> int:
     """Main entry point for the ``jsap-slurm`` CLI.
 
-    Parses a unified YAML configuration, extracts the ``deployment`` block,
-    strips it from the YAML, and either runs the target locally (for
-    ``--print_config`` dry runs) or dispatches the job to SLURM.
+    Uses ``auto_parser`` to generate a parser from the ``setup_cluster``
+    function signature, dynamically splits CLI args and YAML keys into
+    wrapper and target portions, and either runs locally (``--print_config``)
+    or dispatches to SLURM.
 
     Returns:
         Exit code (0 on success, non-zero on error).
     """
-    wrapper_args, target_args = _split_args(sys.argv)
-    config_path_str, is_print_config, deployment_overrides = _parse_wrapper_args(
-        wrapper_args
+    parser = auto_parser(
+        setup_cluster,
+        description="jsap-slurm: JSONArgParse SLURM Wrapper",
     )
 
-    if not config_path_str:
-        print("ERROR: A config file must be provided via '--config'.")
+    config_path = None
+    if "--config" in sys.argv:
+        idx = sys.argv.index("--config")
+        config_path = Path(sys.argv[idx + 1]).resolve()
+    elif "-c" in sys.argv:
+        idx = sys.argv.index("-c")
+        config_path = Path(sys.argv[idx + 1]).resolve()
+
+    raw_yaml = {}
+    if config_path and config_path.exists():
+        with open(config_path, "r") as f:
+            raw_yaml = yaml.safe_load(f) or {}
+
+    wrapper_args, target_args, wrapper_yaml, target_yaml = split_by_signature(
+        parser, sys.argv[1:], raw_yaml
+    )
+
+    if not wrapper_yaml:
+        print(
+            "ERROR: No wrapper configuration found in the provided config. "
+            "Expected top-level keys matching the setup_cluster signature "
+            "(slurm, container or repos)."
+        )
         return 1
-    config_path = Path(config_path_str).resolve()
-    if not config_path.exists():
-        print("ERROR: Config file not found: {}".format(config_path))
-        return 1
 
-    with open(config_path, "r") as f:
-        raw_yaml = yaml.safe_load(f)
+    parser.set_defaults(**wrapper_yaml)
+    filtered_args = _filter_parser_args(wrapper_args)
+    cfg = parser.parse_args(filtered_args)
+    deploy_cfg = DeploymentConfig(
+        slurm=cfg.slurm,
+        container=cfg.container,
+        repos=getattr(cfg, "repos", {}),
+    )
 
-    yaml_deployment = raw_yaml.pop("deployment", None)
-    if yaml_deployment is None:
-        print("ERROR: No 'deployment' section found in the provided config.")
-        return 1
-    deploy_cfg = _build_deployment_config(yaml_deployment)
-    _apply_deployment_overrides(deploy_cfg, deployment_overrides)
+    clean_yaml_str = yaml.dump(target_yaml, sort_keys=False)
 
-    clean_yaml_str = yaml.dump(raw_yaml, sort_keys=False)
-
+    is_print_config = (
+        "--print_config" in sys.argv
+        or (len(sys.argv) == 2 and sys.argv[1] == "--print_config")
+    )
     if is_print_config:
         return _run_print_config_locally(target_args, clean_yaml_str)
 
