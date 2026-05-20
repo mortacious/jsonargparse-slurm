@@ -23,8 +23,8 @@ from .config_schema import (
 
 
 def setup_cluster(
-    slurm: SlurmConfig,
-    container: ContainerConfig,
+    slurm: SlurmConfig = SlurmConfig(),
+    container: ContainerConfig = ContainerConfig(),
     repos: Dict[str, RepoConfig] = {},
 ) -> DeploymentConfig:
     """Entry-point function whose signature drives the wrapper parser.
@@ -374,21 +374,16 @@ def main() -> int:
         config_path = Path(sys.argv[idx + 1]).resolve()
 
     raw_yaml = {}
-    if config_path and config_path.exists():
+    if config_path:
+        if not config_path.exists():
+            print("ERROR: Config file not found: {}".format(config_path))
+            return 1
         with open(config_path, "r") as f:
             raw_yaml = yaml.safe_load(f) or {}
 
     wrapper_args, target_args, wrapper_yaml, target_yaml = split_by_signature(
         parser, sys.argv[1:], raw_yaml
     )
-
-    if not wrapper_yaml:
-        print(
-            "ERROR: No wrapper configuration found in the provided config. "
-            "Expected top-level keys matching the setup_cluster signature "
-            "(slurm, container or repos)."
-        )
-        return 1
 
     parser.set_defaults(**wrapper_yaml)
     filtered_args = _filter_parser_args(wrapper_args)

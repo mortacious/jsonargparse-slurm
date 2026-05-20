@@ -97,6 +97,13 @@ class TestSetupCluster:
         assert result.slurm.job_name == "test"
         assert result.container.image == "img"
 
+    def test_all_defaults(self):
+        result = setup_cluster()
+        assert isinstance(result, DeploymentConfig)
+        assert result.slurm.job_name == "jsap_job"
+        assert result.container.image == "ubuntu:22.04"
+        assert result.repos == {}
+
 
 class TestSplitBySignature:
     """Tests for split_by_signature."""
@@ -559,18 +566,26 @@ class TestMain:
         content = generated[0].read_text()
         assert "#SBATCH --job-name=train_job" in content
 
-    def test_missing_wrapper_keys_in_yaml_errors(self, tmp_path):
+    def test_no_wrapper_keys_uses_defaults(self, tmp_path):
         yaml_data = {"training": {"lr": 0.001}}
         config_path = self._write_config(tmp_path, yaml_data)
 
-        with patch("sys.argv", [
-            "jsap-slurm",
-            "--config", config_path,
-            "python", "train.py",
-        ]):
-            result = main()
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("sys.argv", [
+                "jsap-slurm",
+                "--config", config_path,
+                "python", "train.py",
+            ]):
+                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                    result = main()
+        finally:
+            os.chdir(original_cwd)
 
-        assert result == 1
+        assert result == 0
+        generated = list(tmp_path.glob("logs/jsap_job_*.sbatch"))
+        assert len(generated) == 1
 
     def test_missing_config_file_errors(self, tmp_path):
         config_path = str(tmp_path / "nonexistent.yaml")
@@ -655,6 +670,48 @@ class TestMain:
         assert len(generated) == 1
         content = generated[0].read_text()
         assert "#SBATCH --job-name=override_job" in content
+
+
+    def test_nothing_passed_uses_all_defaults(self, tmp_path):
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("sys.argv", [
+                "jsap-slurm",
+                "python", "train.py",
+            ]):
+                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                    result = main()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result == 0
+        generated = list(tmp_path.glob("logs/jsap_job_*.sbatch"))
+        assert len(generated) == 1
+        content2 = generated[0].read_text()
+        assert "#SBATCH --job-name=jsap_job" in content2
+
+    def test_only_cli_overrides_no_yaml(self, tmp_path):
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("sys.argv", [
+                "jsap-slurm",
+                "--slurm.job_name", "cli_only_job",
+                "--slurm.partition", "debug",
+                "python", "train.py",
+            ]):
+                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                    result = main()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result == 0
+        generated = list(tmp_path.glob("logs/cli_only_job_*.sbatch"))
+        assert len(generated) == 1
+        content3 = generated[0].read_text()
+        assert "#SBATCH --job-name=cli_only_job" in content3
+        assert "#SBATCH --partition=debug" in content3
 
 
 class TestYamlCleaning:
