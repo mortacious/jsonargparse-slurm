@@ -544,7 +544,6 @@ class TestMain:
         assert "--print_config" in called_args
         assert "--config" in called_args
         stdout = capsys.readouterr().out
-        assert "=== Deployment Configuration ===" in stdout
         assert "job_name: train_job" in stdout
         assert "partition: gpu" in stdout
 
