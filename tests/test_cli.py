@@ -526,7 +526,7 @@ class TestMain:
             yaml.dump(data, f)
         return str(config_path)
 
-    def test_print_config_flow(self, tmp_path):
+    def test_print_config_flow(self, tmp_path, capsys):
         config_path = self._write_config(tmp_path, _sample_yaml())
 
         with patch("sys.argv", [
@@ -543,6 +543,10 @@ class TestMain:
         called_args = mock_run.call_args[0][0]
         assert "--print_config" in called_args
         assert "--config" in called_args
+        stdout = capsys.readouterr().out
+        assert "=== Deployment Configuration ===" in stdout
+        assert "job_name: train_job" in stdout
+        assert "partition: gpu" in stdout
 
     def test_dispatch_flow_generates_sbatch(self, tmp_path):
         config_path = self._write_config(tmp_path, _sample_yaml())

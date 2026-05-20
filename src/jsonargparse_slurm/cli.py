@@ -286,7 +286,6 @@ def _run_print_config_locally(
     Returns:
         Exit code (0 on success, 1 on failure).
     """
-    print("=== Evaluating config locally (--print_config) ===")
     with tempfile.NamedTemporaryFile(
         mode="w", delete=False, suffix=".yaml"
     ) as tmp:
@@ -401,6 +400,7 @@ def main() -> int:
         or (len(sys.argv) == 2 and sys.argv[1] == "--print_config")
     )
     if is_print_config:
+        print(parser.dump(cfg, format="yaml"))
         return _run_print_config_locally(target_args, clean_yaml_str)
 
     return _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
