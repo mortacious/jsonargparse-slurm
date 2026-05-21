@@ -141,13 +141,24 @@ def _build_repo_setup_script(repos: dict) -> str:
     lines: List[str] = []
     for name, info in repos.items():
         lines.append(f"echo '-> Cloning {name}...'")
-        lines.append(f"git clone --branch {info.branch} {info.url} {name}")
-        lines.append(f"cd {name}")
-        if info.commit != "HEAD":
-            lines.append(f"git checkout {info.commit}")
-        if info.pip_install:
-            lines.append("pip install --no-cache-dir .")
-        lines.append("cd ..")
+        if info.target_path:
+            target = info.target_path
+            lines.append(f"mkdir -p \"$(dirname {target})\"")
+            lines.append(f"git clone --branch {info.branch} {info.url} {target}")
+            lines.append(f"cd {target}")
+            if info.commit != "HEAD":
+                lines.append(f"git checkout {info.commit}")
+            if info.pip_install:
+                lines.append("pip install --no-cache-dir .")
+            lines.append("cd \"$WORKSPACE\"")
+        else:
+            lines.append(f"git clone --branch {info.branch} {info.url} {name}")
+            lines.append(f"cd {name}")
+            if info.commit != "HEAD":
+                lines.append(f"git checkout {info.commit}")
+            if info.pip_install:
+                lines.append("pip install --no-cache-dir .")
+            lines.append("cd ..")
     return "\n".join(lines)
 
 

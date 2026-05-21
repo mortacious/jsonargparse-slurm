@@ -90,6 +90,7 @@ class TestRepoConfig:
         assert cfg.branch == "main"
         assert cfg.commit == "HEAD"
         assert cfg.pip_install is True
+        assert cfg.target_path is None
 
     def test_custom_values(self):
         cfg = RepoConfig(
@@ -97,11 +98,13 @@ class TestRepoConfig:
             branch="dev",
             commit="abc123",
             pip_install=False,
+            target_path="src/my-lib",
         )
         assert cfg.url == "https://github.com/user/repo.git"
         assert cfg.branch == "dev"
         assert cfg.commit == "abc123"
         assert cfg.pip_install is False
+        assert cfg.target_path == "src/my-lib"
 
 
 class TestDeploymentConfig:

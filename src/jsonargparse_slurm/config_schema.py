@@ -46,6 +46,7 @@ class RepoConfig:
     branch: str = "main"
     commit: str = "HEAD"
     pip_install: bool = True
+    target_path: Optional[str] = None
 
 
 @dataclass

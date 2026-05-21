@@ -256,6 +256,57 @@ class TestBuildRepoSetupScript:
         result = _build_repo_setup_script({})
         assert result == ""
 
+    def test_target_path_relative(self):
+        repos = {
+            "lib": RepoConfig(
+                url="https://github.com/user/lib.git",
+                target_path="subdirs/my-lib",
+            ),
+        }
+        result = _build_repo_setup_script(repos)
+        assert 'mkdir -p "$(dirname subdirs/my-lib)"' in result
+        assert "git clone --branch main https://github.com/user/lib.git subdirs/my-lib" in result
+        assert "cd subdirs/my-lib" in result
+        assert 'cd "$WORKSPACE"' in result
+        assert "cd .." not in result
+
+    def test_target_path_absolute(self):
+        repos = {
+            "lib": RepoConfig(
+                url="https://github.com/user/lib.git",
+                target_path="/opt/libs/my-lib",
+            ),
+        }
+        result = _build_repo_setup_script(repos)
+        assert 'mkdir -p "$(dirname /opt/libs/my-lib)"' in result
+        assert "git clone --branch main https://github.com/user/lib.git /opt/libs/my-lib" in result
+        assert "cd /opt/libs/my-lib" in result
+        assert 'cd "$WORKSPACE"' in result
+
+    def test_target_path_with_commit(self):
+        repos = {
+            "lib": RepoConfig(
+                url="https://github.com/user/lib.git",
+                target_path="custom/path",
+                commit="def456",
+            ),
+        }
+        result = _build_repo_setup_script(repos)
+        assert "git checkout def456" in result
+        assert "pip install --no-cache-dir ." in result
+
+    def test_target_path_without_pip_install(self):
+        repos = {
+            "lib": RepoConfig(
+                url="https://github.com/user/lib.git",
+                target_path="custom/path",
+                pip_install=False,
+            ),
+        }
+        result = _build_repo_setup_script(repos)
+        assert "pip install" not in result
+        assert 'cd "$WORKSPACE"' in result
+
 
 class TestBuildEnvExports:
     """Tests for _build_env_exports."""
