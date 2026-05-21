@@ -167,6 +167,8 @@ def _build_container_script(
     clean_yaml_str: str,
     repo_setup: str,
     target_cmd_str: str,
+    workspace: str = "/workspace",
+    run_workspace: str = "/workspace",
 ) -> str:
     """Assemble the inline container bash script with Heredoc config injection.
 
@@ -174,6 +176,8 @@ def _build_container_script(
         clean_yaml_str: The cleaned YAML content (without wrapper keys).
         repo_setup: Shell commands for repository cloning and setup.
         target_cmd_str: Shell-escaped target command string.
+        workspace: Directory where repositories are cloned.
+        run_workspace: Directory where the target script is executed.
 
     Returns:
         Complete bash script string to run inside the container via srun.
@@ -181,7 +185,7 @@ def _build_container_script(
     return f"""set -e
 export PATH="/opt/conda/envs/perception_env/bin:$PATH"
 
-WORKSPACE="/tmp/custom_code"
+WORKSPACE="{workspace}"
 mkdir -p "$WORKSPACE"
 cd "$WORKSPACE"
 
@@ -190,6 +194,10 @@ cat << 'EOF_CONFIG' > /tmp/clean_config_$$.yaml
 EOF_CONFIG
 
 {repo_setup}
+
+RUN_WORKSPACE="{run_workspace}"
+mkdir -p "$RUN_WORKSPACE"
+cd "$RUN_WORKSPACE"
 
 echo "=== Executing Target Script ==="
 {target_cmd_str} --config /tmp/clean_config_$$.yaml
@@ -340,7 +348,9 @@ def _dispatch_slurm_job(
     target_cmd_str = shlex.join(target_args)
 
     container_script = _build_container_script(
-        clean_yaml_str, repo_setup, target_cmd_str
+        clean_yaml_str, repo_setup, target_cmd_str,
+        workspace=deploy_cfg.container.workspace,
+        run_workspace=deploy_cfg.container.run_workspace,
     )
 
     log_dir = Path("logs").resolve()

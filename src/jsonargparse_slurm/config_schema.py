@@ -34,6 +34,8 @@ class ContainerConfig:
     mount_netrc: bool = True
     netrc_host_path: str = "~/.netrc"
     netrc_container_path: str = "/root/.netrc"
+    workspace: str = "/workspace"
+    run_workspace: str = "/workspace"
 
 
 @dataclass

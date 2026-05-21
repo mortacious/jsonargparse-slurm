@@ -304,8 +304,26 @@ class TestBuildContainerScript:
         result = _build_container_script("", "", "python train.py")
         assert "set -e" in result
         assert 'export PATH="/opt/conda/envs/perception_env/bin:$PATH"' in result
-        assert 'WORKSPACE="/tmp/custom_code"' in result
+        assert 'WORKSPACE="/workspace"' in result
         assert 'mkdir -p "$WORKSPACE"' in result
+        assert 'cd "$WORKSPACE"' in result
+        assert 'RUN_WORKSPACE="/workspace"' in result
+        assert 'mkdir -p "$RUN_WORKSPACE"' in result
+        assert 'cd "$RUN_WORKSPACE"' in result
+
+    def test_custom_workspace(self):
+        result = _build_container_script(
+            "", "", "python train.py",
+            workspace="/setup/path",
+            run_workspace="/run/path",
+        )
+        assert 'WORKSPACE="/setup/path"' in result
+        assert 'mkdir -p "$WORKSPACE"' in result
+        assert 'cd "$WORKSPACE"' in result
+        assert 'RUN_WORKSPACE="/run/path"' in result
+        assert 'mkdir -p "$RUN_WORKSPACE"' in result
+        assert 'cd "$RUN_WORKSPACE"' in result
+        assert result.index('cd "$WORKSPACE"') < result.index('cd "$RUN_WORKSPACE"')
 
 
 class TestResolveMounts:

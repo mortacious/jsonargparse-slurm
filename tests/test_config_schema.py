@@ -57,6 +57,8 @@ class TestContainerConfig:
         assert cfg.mount_netrc is True
         assert cfg.netrc_host_path == "~/.netrc"
         assert cfg.netrc_container_path == "/root/.netrc"
+        assert cfg.workspace == "/workspace"
+        assert cfg.run_workspace == "/workspace"
 
     def test_custom_values(self):
         cfg = ContainerConfig(
@@ -66,6 +68,8 @@ class TestContainerConfig:
             mount_netrc=False,
             netrc_host_path="/custom/.netrc",
             netrc_container_path="/home/user/.netrc",
+            workspace="/custom/code",
+            run_workspace="/custom/code/subdir",
         )
         assert cfg.image == "nvcr.io/nvidia/pytorch:23.10-py3"
         assert cfg.mounts == ["/data:/data", "/scratch:/scratch"]
@@ -73,6 +77,8 @@ class TestContainerConfig:
         assert cfg.mount_netrc is False
         assert cfg.netrc_host_path == "/custom/.netrc"
         assert cfg.netrc_container_path == "/home/user/.netrc"
+        assert cfg.workspace == "/custom/code"
+        assert cfg.run_workspace == "/custom/code/subdir"
 
 
 class TestRepoConfig:
