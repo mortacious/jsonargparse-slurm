@@ -200,7 +200,6 @@ def _build_container_script(
         Complete bash script string to run inside the container via srun.
     """
     return f"""set -e
-export PATH="/opt/conda/envs/perception_env/bin:$PATH"
 
 WORKSPACE="{workspace}"
 mkdir -p "$WORKSPACE"
@@ -228,9 +227,9 @@ def _build_sbatch_content(
     env_exports: str,
     container_script: str,
     mounts_str: str,
-    log_dir: Path,
+    log_dir: Optional[Path],
     timestamp: str,
-) -> Tuple[str, Path]:
+) -> Tuple[str, Optional[Path]]:
     """Build the SBATCH submission script content and return it with its file path.
 
     Args:
@@ -238,14 +237,20 @@ def _build_sbatch_content(
         env_exports: Shell ``export`` statements for container environment.
         container_script: The inline container bash script.
         mounts_str: Comma-separated container mount specifications.
-        log_dir: Directory for SLURM output logs.
+        log_dir: Directory for SLURM output logs. If ``None``, no
+            ``#SBATCH --output`` directive is emitted.
         timestamp: Timestamp string for the sbatch filename.
 
     Returns:
-        Tuple of (sbatch script content as string, Path to the sbatch file).
+        Tuple of (sbatch script content as string, optional Path to the sbatch file).
+        The sbatch file path is ``None`` when ``log_dir`` is ``None``.
     """
-    log_file = log_dir / f"{deploy_cfg.slurm.job_name}_%j.out"
-    sbatch_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
+    output_directive = ""
+    sbatch_file: Optional[Path] = None
+    if log_dir is not None:
+        log_file = log_dir / f"{deploy_cfg.slurm.job_name}_%j.out"
+        output_directive = f"#SBATCH --output={log_file}"
+        sbatch_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
 
     mail_directives = ""
     if deploy_cfg.slurm.mail_user:
@@ -256,7 +261,7 @@ def _build_sbatch_content(
 
     content = f"""#!/bin/bash
 #SBATCH --job-name={deploy_cfg.slurm.job_name}
-#SBATCH --output={log_file}
+{output_directive}
 #SBATCH --partition={deploy_cfg.slurm.partition}
 #SBATCH --time={deploy_cfg.slurm.time}
 #SBATCH --nodes={deploy_cfg.slurm.nodes}
@@ -379,14 +384,15 @@ def _dispatch_slurm_job(
         run_workspace=deploy_cfg.container.run_workspace,
     )
 
-    log_dir = Path("logs").resolve()
+    log_dir: Optional[Path] = None
+    if deploy_cfg.slurm.output_path:
+        log_dir = Path(deploy_cfg.slurm.output_path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     sbatch_content, _ = _build_sbatch_content(
         deploy_cfg, env_exports, container_script, mounts_str, log_dir, timestamp
     )
     if deploy_cfg.dry_run:
-        # Print the SBATCH script and exit
         print(sbatch_content)
         return 0
 
@@ -396,8 +402,9 @@ def _dispatch_slurm_job(
         subprocess.run(ssh_cmd, input=sbatch_content, text=True, check=True)
         return 0
 
-    log_dir.mkdir(parents=True, exist_ok=True)
-    sbatch_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
+    if log_dir is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    sbatch_file = (log_dir or Path(".")) / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
 
     with open(sbatch_file, "w") as f:
         f.write(sbatch_content)

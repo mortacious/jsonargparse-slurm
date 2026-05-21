@@ -46,6 +46,7 @@ def _sample_yaml():
             "cpus_per_task": 32,
             "mem": "128G",
             "gpu_bind": "none",
+            "output_path": "logs",
         },
         "container": {
             "image": "nvcr.io/nvidia/pytorch:23.10-py3",
@@ -75,6 +76,7 @@ def _sample_deployment_config():
             cpus_per_task=32,
             mem="128G",
             gpu_bind="none",
+            output_path="logs",
         ),
         container=ContainerConfig(
             image="nvcr.io/nvidia/pytorch:23.10-py3",
@@ -354,7 +356,6 @@ class TestBuildContainerScript:
     def test_set_e_and_workspace_setup(self):
         result = _build_container_script("", "", "python train.py")
         assert "set -e" in result
-        assert 'export PATH="/opt/conda/envs/perception_env/bin:$PATH"' in result
         assert 'WORKSPACE="/workspace"' in result
         assert 'mkdir -p "$WORKSPACE"' in result
         assert 'cd "$WORKSPACE"' in result
@@ -601,10 +602,13 @@ class TestDispatchSlurmJob:
         deploy_cfg = _sample_deployment_config()
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
-        with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
                 result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
 
         assert result == 0
         mock_run.assert_called_once()
@@ -616,10 +620,13 @@ class TestDispatchSlurmJob:
         deploy_cfg.dry_run = True
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
-        with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
                 result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
 
         assert result == 0
         mock_run.assert_not_called()
@@ -633,10 +640,13 @@ class TestDispatchSlurmJob:
         deploy_cfg.dry_run = False
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
-        with patch("jsonargparse_slurm.cli.subprocess.run"):
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.run"):
                 _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
 
         stdout = capsys.readouterr().out
         assert "#SBATCH --job-name=train_job" not in stdout
@@ -646,13 +656,16 @@ class TestDispatchSlurmJob:
         deploy_cfg = _sample_deployment_config()
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
-        with patch("jsonargparse_slurm.cli.subprocess.run"):
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.run"):
                 with patch("builtins.open", create=True) as mock_open_fn:
                     mock_file = MagicMock()
                     mock_open_fn.return_value.__enter__.return_value = mock_file
                     result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
 
         assert result == 0
         mock_file.write.assert_called_once()
@@ -676,9 +689,7 @@ class TestDispatchSlurmJobSsh:
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
         with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
-                result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+            result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
         assert result == 0
         mock_run.assert_called_once()
@@ -700,10 +711,8 @@ class TestDispatchSlurmJobSsh:
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
         with patch("jsonargparse_slurm.cli.subprocess.run"):
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
-                with patch("builtins.open") as mock_open:
-                    result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+            with patch("builtins.open") as mock_open:
+                result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
         assert result == 0
         mock_open.assert_not_called()
@@ -727,8 +736,8 @@ class TestDispatchSlurmJobSsh:
         with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
             with patch("jsonargparse_slurm.cli.Path.expanduser",
                        return_value=Path("/home/user/.netrc")):
-                with patch("jsonargparse_slurm.cli.Path.resolve") as mock_resolve:
-                    mock_resolve.side_effect = [Path("/home/user/.netrc"), tmp_path]
+                with patch("jsonargparse_slurm.cli.Path.resolve",
+                           return_value=Path("/home/user/.netrc")):
                     with patch.object(Path, "exists", return_value=False):
                         _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
@@ -806,7 +815,7 @@ class TestMain:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/jsap_job_*.sbatch"))
+        generated = list(tmp_path.glob("jsap_job_*.sbatch"))
         assert len(generated) == 1
 
     def test_missing_config_file_errors(self, tmp_path):
@@ -908,7 +917,7 @@ class TestMain:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/jsap_job_*.sbatch"))
+        generated = list(tmp_path.glob("jsap_job_*.sbatch"))
         assert len(generated) == 1
         content2 = generated[0].read_text()
         assert "#SBATCH --job-name=jsap_job" in content2
@@ -929,7 +938,7 @@ class TestMain:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/cli_only_job_*.sbatch"))
+        generated = list(tmp_path.glob("cli_only_job_*.sbatch"))
         assert len(generated) == 1
         content3 = generated[0].read_text()
         assert "#SBATCH --job-name=cli_only_job" in content3
@@ -944,13 +953,16 @@ class TestYamlCleaning:
         deploy_cfg = _sample_deployment_config()
         clean_yaml_str = "training:\n  lr: 0.001\ndata:\n  path: /data/dataset\n"
 
-        with patch("jsonargparse_slurm.cli.subprocess.run"):
-            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
-                mock_log_resolve.return_value = tmp_path
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.run"):
                 with patch("builtins.open", create=True) as mock_open_fn:
                     mock_file = MagicMock()
                     mock_open_fn.return_value.__enter__.return_value = mock_file
                     _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
 
         written_sbatch = mock_file.write.call_args[0][0]
         heredoc_start = written_sbatch.find("cat << 'EOF_CONFIG'")
