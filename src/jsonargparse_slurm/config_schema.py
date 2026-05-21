@@ -19,6 +19,8 @@ class SlurmConfig:
     cpus_per_task: int = 16
     mem: str = "64G"
     gpu_bind: str = "none"
+    mail_user: Optional[str] = None
+    mail_type: Optional[str] = None
     ssh_remote: Optional[str] = None
 
 

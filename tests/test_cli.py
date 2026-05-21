@@ -373,6 +373,38 @@ class TestBuildSbatchContent:
         assert "#SBATCH --mem=128G" in content
         assert "#SBATCH --gpu-bind=none" in content
 
+    def test_sbatch_mail_directives_when_set(self, tmp_path):
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(
+                job_name="mail_test",
+                mail_user="user@example.com",
+                mail_type="END,FAIL",
+            ),
+        )
+        content, _ = _build_sbatch_content(
+            deploy_cfg,
+            env_exports="",
+            container_script="echo hello",
+            mounts_str="",
+            log_dir=tmp_path,
+            timestamp="20240101_120000",
+        )
+        assert "#SBATCH --mail-user=user@example.com" in content
+        assert "#SBATCH --mail-type=END,FAIL" in content
+
+    def test_sbatch_no_mail_directives_when_unset(self, tmp_path):
+        deploy_cfg = _sample_deployment_config()
+        content, _ = _build_sbatch_content(
+            deploy_cfg,
+            env_exports="",
+            container_script="echo hello",
+            mounts_str="",
+            log_dir=tmp_path,
+            timestamp="20240101_120000",
+        )
+        assert "#SBATCH --mail-user" not in content
+        assert "#SBATCH --mail-type" not in content
+
     def test_sbatch_includes_srun_call(self, tmp_path):
         deploy_cfg = _sample_deployment_config()
         content, _ = _build_sbatch_content(

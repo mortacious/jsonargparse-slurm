@@ -222,6 +222,13 @@ def _build_sbatch_content(
     log_file = log_dir / f"{deploy_cfg.slurm.job_name}_%j.out"
     sbatch_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
 
+    mail_directives = ""
+    if deploy_cfg.slurm.mail_user:
+        mail_directives += f"#SBATCH --mail-user={deploy_cfg.slurm.mail_user}\n"
+    if deploy_cfg.slurm.mail_type:
+        mail_directives += f"#SBATCH --mail-type={deploy_cfg.slurm.mail_type}\n"
+    mail_directives = mail_directives.rstrip("\n")
+
     content = f"""#!/bin/bash
 #SBATCH --job-name={deploy_cfg.slurm.job_name}
 #SBATCH --output={log_file}
@@ -233,7 +240,7 @@ def _build_sbatch_content(
 #SBATCH --cpus-per-task={deploy_cfg.slurm.cpus_per_task}
 #SBATCH --mem={deploy_cfg.slurm.mem}
 #SBATCH --gpu-bind={deploy_cfg.slurm.gpu_bind}
-
+{mail_directives}
 {env_exports}
 
 CONTAINER_CMD=$(cat << 'EOF'
