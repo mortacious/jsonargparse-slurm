@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -19,6 +19,7 @@ class SlurmConfig:
     cpus_per_task: int = 16
     mem: str = "64G"
     gpu_bind: str = "none"
+    ssh_remote: Optional[str] = None
 
 
 @dataclass

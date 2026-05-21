@@ -313,6 +313,10 @@ def _dispatch_slurm_job(
 ) -> int:
     """Generate the SBATCH script and submit it to SLURM.
 
+    If ``deploy_cfg.slurm.ssh_remote`` is set, pipes the sbatch script to the
+    remote host via SSH instead of writing a local file and calling ``sbatch``
+    directly.
+
     Args:
         target_args: The target command arguments.
         deploy_cfg: The parsed deployment configuration.
@@ -333,12 +337,20 @@ def _dispatch_slurm_job(
     )
 
     log_dir = Path("logs").resolve()
-    log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    sbatch_content, sbatch_file = _build_sbatch_content(
+    sbatch_content, _ = _build_sbatch_content(
         deploy_cfg, env_exports, container_script, mounts_str, log_dir, timestamp
     )
+
+    if deploy_cfg.slurm.ssh_remote:
+        print(f"Submitting via SSH to {deploy_cfg.slurm.ssh_remote}...")
+        ssh_cmd = ["ssh", deploy_cfg.slurm.ssh_remote, "sbatch"]
+        subprocess.run(ssh_cmd, input=sbatch_content, text=True, check=True)
+        return 0
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    sbatch_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
 
     with open(sbatch_file, "w") as f:
         f.write(sbatch_content)

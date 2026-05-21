@@ -517,6 +517,54 @@ class TestDispatchSlurmJob:
         assert "training:\n  lr: 0.001" in written_sbatch
 
 
+class TestDispatchSlurmJobSsh:
+    """Tests for _dispatch_slurm_job with ssh_remote set."""
+
+    def test_pipes_sbatch_via_ssh(self, tmp_path):
+        target_args = ["python", "train.py"]
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(
+                job_name="ssh_job",
+                ssh_remote="user@login.cluster.edu",
+            ),
+            container=ContainerConfig(image="img:latest"),
+        )
+        clean_yaml_str = "training:\n  lr: 0.001\n"
+
+        with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
+            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
+                mock_log_resolve.return_value = tmp_path
+                result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+
+        assert result == 0
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert call_args == ["ssh", "user@login.cluster.edu", "sbatch"]
+        call_kwargs = mock_run.call_args[1]
+        assert "input" in call_kwargs
+        assert "#SBATCH --job-name=ssh_job" in call_kwargs["input"]
+
+    def test_ssh_does_not_write_local_sbatch_file(self, tmp_path):
+        target_args = ["python", "train.py"]
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(
+                job_name="ssh_job",
+                ssh_remote="user@login.cluster.edu",
+            ),
+            container=ContainerConfig(image="img:latest"),
+        )
+        clean_yaml_str = "training:\n  lr: 0.001\n"
+
+        with patch("jsonargparse_slurm.cli.subprocess.run"):
+            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
+                mock_log_resolve.return_value = tmp_path
+                with patch("builtins.open") as mock_open:
+                    result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+
+        assert result == 0
+        mock_open.assert_not_called()
+
+
 class TestMain:
     """Integration tests for the main() function."""
 
