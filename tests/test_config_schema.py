@@ -115,6 +115,7 @@ class TestDeploymentConfig:
         assert isinstance(cfg.slurm, SlurmConfig)
         assert isinstance(cfg.container, ContainerConfig)
         assert cfg.repos == {}
+        assert cfg.dry_run is False
 
     def test_nested_config_values(self):
         cfg = DeploymentConfig(

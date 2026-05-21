@@ -403,6 +403,18 @@ class TestResolveMounts:
                     mounts = _resolve_mounts(container_cfg)
         assert len(mounts) == 0
 
+    def test_netrc_not_found_but_skip_check(self):
+        container_cfg = ContainerConfig(
+            mount_netrc=True,
+            netrc_host_path="/home/remote/.netrc",
+            netrc_container_path="/root/.netrc",
+        )
+        with patch.object(Path, "expanduser", return_value=Path("/home/remote/.netrc")):
+            with patch.object(Path, "resolve", return_value=Path("/home/remote/.netrc")):
+                with patch.object(Path, "exists", return_value=False):
+                    mounts = _resolve_mounts(container_cfg, check_exists=False)
+        assert "/home/remote/.netrc:/root/.netrc" in mounts
+
     def test_netrc_disabled(self):
         container_cfg = ContainerConfig(mount_netrc=False)
         mounts = _resolve_mounts(container_cfg)
@@ -598,6 +610,37 @@ class TestDispatchSlurmJob:
         mock_run.assert_called_once()
         assert "sbatch" == mock_run.call_args[0][0][0]
 
+    def test_dry_run_outputs_sbatch_content(self, tmp_path, capsys):
+        target_args = ["python", "train.py"]
+        deploy_cfg = _sample_deployment_config()
+        deploy_cfg.dry_run = True
+        clean_yaml_str = "training:\n  lr: 0.001\n"
+
+        with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
+            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
+                mock_log_resolve.return_value = tmp_path
+                result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+
+        assert result == 0
+        mock_run.assert_not_called()
+        stdout = capsys.readouterr().out
+        assert "#SBATCH --job-name=train_job" in stdout
+        assert "srun -K" in stdout
+
+    def test_dry_run_false_does_not_print(self, tmp_path, capsys):
+        target_args = ["python", "train.py"]
+        deploy_cfg = _sample_deployment_config()
+        deploy_cfg.dry_run = False
+        clean_yaml_str = "training:\n  lr: 0.001\n"
+
+        with patch("jsonargparse_slurm.cli.subprocess.run"):
+            with patch("jsonargparse_slurm.cli.Path.resolve") as mock_log_resolve:
+                mock_log_resolve.return_value = tmp_path
+                _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+
+        stdout = capsys.readouterr().out
+        assert "#SBATCH --job-name=train_job" not in stdout
+
     def test_sbatch_file_contains_clean_yaml(self, tmp_path):
         target_args = ["python", "train.py"]
         deploy_cfg = _sample_deployment_config()
@@ -664,6 +707,33 @@ class TestDispatchSlurmJobSsh:
 
         assert result == 0
         mock_open.assert_not_called()
+
+    def test_ssh_includes_netrc_mount_when_not_found_locally(self, tmp_path):
+        target_args = ["python", "train.py"]
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(
+                job_name="ssh_netrc_job",
+                ssh_remote="user@login.cluster.edu",
+            ),
+            container=ContainerConfig(
+                image="img:latest",
+                mount_netrc=True,
+                netrc_host_path="~/.netrc",
+                netrc_container_path="/root/.netrc",
+            ),
+        )
+        clean_yaml_str = ""
+
+        with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
+            with patch("jsonargparse_slurm.cli.Path.expanduser",
+                       return_value=Path("/home/user/.netrc")):
+                with patch("jsonargparse_slurm.cli.Path.resolve") as mock_resolve:
+                    mock_resolve.side_effect = [Path("/home/user/.netrc"), tmp_path]
+                    with patch.object(Path, "exists", return_value=False):
+                        _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+
+        sbatch_content = mock_run.call_args[1]["input"]
+        assert "/home/user/.netrc:/root/.netrc" in sbatch_content
 
 
 class TestMain:

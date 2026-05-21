@@ -26,6 +26,7 @@ def setup_cluster(
     slurm: SlurmConfig = SlurmConfig(),
     container: ContainerConfig = ContainerConfig(),
     repos: Dict[str, RepoConfig] = {},
+    dry_run: bool = False,
 ) -> DeploymentConfig:
     """Entry-point function whose signature drives the wrapper parser.
 
@@ -33,11 +34,14 @@ def setup_cluster(
         slurm: SLURM resource allocation settings.
         container: Container image and runtime settings.
         repos: Git repositories to clone inside the container.
+        dry_run: If True, print the full SBATCH script to stdout and exit.
 
     Returns:
         Consolidated :class:`DeploymentConfig`.
     """
-    return DeploymentConfig(slurm=slurm, container=container, repos=repos)
+    return DeploymentConfig(
+        slurm=slurm, container=container, repos=repos, dry_run=dry_run,
+    )
 
 
 def split_by_signature(
@@ -133,13 +137,15 @@ def _build_repo_setup_script(repos: dict) -> str:
     """Generate shell commands to clone and optionally install repositories.
 
     Args:
-        repos: Mapping of repo name to :class:`.RepoConfig` instances.
+        repos: Mapping of repo name to :class:`.RepoConfig` instances or dicts.
 
     Returns:
         Multi-line bash snippet for cloning and setting up repositories.
     """
     lines: List[str] = []
     for name, info in repos.items():
+        if isinstance(info, dict):
+            info = RepoConfig(**info)
         lines.append(f"echo '-> Cloning {name}...'")
         if info.target_path:
             target = info.target_path
@@ -275,11 +281,17 @@ srun -K \\
     return content, sbatch_file
 
 
-def _resolve_mounts(container_cfg: ContainerConfig) -> List[str]:
+def _resolve_mounts(
+    container_cfg: ContainerConfig,
+    check_exists: bool = True,
+) -> List[str]:
     """Resolve container mounts including the optional ``.netrc`` mount.
 
     Args:
         container_cfg: The parsed container configuration.
+        check_exists: Whether to verify that mount source paths exist locally.
+            Set to ``False`` when submitting via SSH, since the file lives on
+            the remote login node.
 
     Returns:
         List of mount specifications (``host:container`` strings).
@@ -287,14 +299,14 @@ def _resolve_mounts(container_cfg: ContainerConfig) -> List[str]:
     mounts = list(container_cfg.mounts)
     if container_cfg.mount_netrc:
         host_netrc = Path(container_cfg.netrc_host_path).expanduser().resolve()
-        if host_netrc.exists():
-            mounts.append(
-                f"{host_netrc}:{container_cfg.netrc_container_path}"
-            )
-        else:
+        if check_exists and not host_netrc.exists():
             print(
                 f"WARNING: mount_netrc is True, but {host_netrc} "
                 "not found on host."
+            )
+        else:
+            mounts.append(
+                f"{host_netrc}:{container_cfg.netrc_container_path}"
             )
     return mounts
 
@@ -351,7 +363,10 @@ def _dispatch_slurm_job(
     Returns:
         Exit code (0 on success, 1 on failure).
     """
-    mounts = _resolve_mounts(deploy_cfg.container)
+    mounts = _resolve_mounts(
+        deploy_cfg.container,
+        check_exists=not deploy_cfg.slurm.ssh_remote,
+    )
     mounts_str = ",".join(mounts)
 
     repo_setup = _build_repo_setup_script(deploy_cfg.repos)
@@ -370,6 +385,10 @@ def _dispatch_slurm_job(
     sbatch_content, _ = _build_sbatch_content(
         deploy_cfg, env_exports, container_script, mounts_str, log_dir, timestamp
     )
+    if deploy_cfg.dry_run:
+        # Print the SBATCH script and exit
+        print(sbatch_content)
+        return 0
 
     if deploy_cfg.slurm.ssh_remote:
         print(f"Submitting via SSH to {deploy_cfg.slurm.ssh_remote}...")
@@ -431,6 +450,7 @@ def main() -> int:
         slurm=cfg.slurm,
         container=cfg.container,
         repos=getattr(cfg, "repos", {}),
+        dry_run=getattr(cfg, "dry_run", False),
     )
 
     clean_yaml_str = yaml.dump(target_yaml, sort_keys=False)

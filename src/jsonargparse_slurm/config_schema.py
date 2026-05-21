@@ -56,3 +56,4 @@ class DeploymentConfig:
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
     container: ContainerConfig = field(default_factory=ContainerConfig)
     repos: Dict[str, RepoConfig] = field(default_factory=dict)
+    dry_run: bool = False
