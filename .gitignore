@@ -9,3 +9,4 @@ build/
 *.egg
 .venv/
 venv/
+_version.py

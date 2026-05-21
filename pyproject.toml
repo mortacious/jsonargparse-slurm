@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jsonargparse-slurm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "SLURM deployment wrapper for Python scripts using jsonargparse"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,9 @@ test = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+write_to = "src/jsonargparse_slurm/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
