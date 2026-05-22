@@ -370,17 +370,17 @@ def _dispatch_slurm_job(
         container_script = f"{env_exports}\n{container_script}"
 
     srun_args = _build_srun_args(deploy_cfg)
-    srun_cmd = srun_args + ["/bin/bash", "-c", container_script]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if deploy_cfg.dry_run:
+        base = " ".join(shlex.quote(a) for a in srun_args)
         if deploy_cfg.slurm.ssh_remote:
             mounts_part = f"--container-mounts={mounts_str}"
         else:
             mounts_part = f"--container-mounts={_expand_mounts(mounts)}"
-        cmd_str = " ".join(shlex.quote(a) for a in srun_cmd)
-        print(f"NVIDIA_DRIVER_CAPABILITIES=compute,utility {cmd_str} {mounts_part}")
+        script_part = " ".join(shlex.quote(a) for a in ["/bin/bash", "-c", container_script])
+        print(f"NVIDIA_DRIVER_CAPABILITIES=compute,utility {base} {mounts_part} {script_part}")
         return 0
 
     log_dir = Path(deploy_cfg.slurm.output_path) if deploy_cfg.slurm.output_path else Path(".")
@@ -388,12 +388,15 @@ def _dispatch_slurm_job(
     log_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.log"
 
     if deploy_cfg.slurm.ssh_remote:
-        base_cmd = " ".join(shlex.quote(a) for a in srun_cmd)
+        base = " ".join(shlex.quote(a) for a in srun_args)
+        remote_srun = (
+            f"{base} --container-mounts={mounts_str}"
+            f" {shlex.quote('/bin/bash')} {shlex.quote('-c')} {shlex.quote(container_script)}"
+        )
         remote_cmd = (
             "NVIDIA_DRIVER_CAPABILITIES=compute,utility " +
             "nohup " +
-            base_cmd +
-            f" --container-mounts={mounts_str}" +
+            remote_srun +
             " > " + shlex.quote(str(log_file)) +
             " 2>&1 &"
         )
@@ -402,7 +405,11 @@ def _dispatch_slurm_job(
         subprocess.run(ssh_cmd, check=True)
         return 0
 
-    srun_cmd = srun_cmd + ["--container-mounts", _expand_mounts(mounts)]
+    srun_cmd = (
+        srun_args
+        + ["--container-mounts", _expand_mounts(mounts)]
+        + ["/bin/bash", "-c", container_script]
+    )
     print(f"Launching srun job: {deploy_cfg.slurm.job_name}")
     env = os.environ.copy()
     env["NVIDIA_DRIVER_CAPABILITIES"] = "compute,utility"
