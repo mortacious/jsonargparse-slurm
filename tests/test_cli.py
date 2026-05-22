@@ -20,7 +20,7 @@ from jsonargparse_slurm.cli import (
     _build_env_exports,
     _build_container_script,
     _resolve_mounts,
-    _build_sbatch_content,
+    _build_srun_args,
     _run_print_config_locally,
     _dispatch_slurm_job,
     main,
@@ -428,30 +428,41 @@ class TestResolveMounts:
         assert len(mounts) == 2
 
 
-class TestBuildSbatchContent:
-    """Tests for _build_sbatch_content."""
+class TestBuildSrunArgs:
+    """Tests for _build_srun_args."""
 
-    def test_sbatch_directives_generated(self, tmp_path):
+    def test_srun_args_includes_resource_flags(self):
         deploy_cfg = _sample_deployment_config()
-        content, sbatch_file = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo hello",
-            mounts_str="/data:/data",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "#SBATCH --job-name=train_job" in content
-        assert "#SBATCH --partition=gpu" in content
-        assert "#SBATCH --time=0-08:00:00" in content
-        assert "#SBATCH --nodes=1" in content
-        assert "#SBATCH --ntasks=1" in content
-        assert "#SBATCH --gpus-per-task=2" in content
-        assert "#SBATCH --cpus-per-task=32" in content
-        assert "#SBATCH --mem=128G" in content
-        assert "#SBATCH --gpu-bind=none" in content
+        srun_args = _build_srun_args(deploy_cfg)
+        assert "srun" in srun_args
+        assert "--overlap" in srun_args
+        assert "-K" in srun_args
+        assert "--job-name" in srun_args
+        assert "train_job" in srun_args
+        assert "--partition" in srun_args
+        assert "gpu" in srun_args
+        assert "--time" in srun_args
+        assert "0-08:00:00" in srun_args
+        assert "--nodes" in srun_args
+        assert "1" in srun_args
+        assert "--ntasks" in srun_args
+        assert "--gpus-per-task" in srun_args
+        assert "2" in srun_args
+        assert "--cpus-per-task" in srun_args
+        assert "32" in srun_args
+        assert "--mem" in srun_args
+        assert "128G" in srun_args
+        assert "--gpu-bind" in srun_args
+        assert "none" in srun_args
 
-    def test_sbatch_mail_directives_when_set(self, tmp_path):
+    def test_srun_args_includes_container_image(self):
+        deploy_cfg = _sample_deployment_config()
+        srun_args = _build_srun_args(deploy_cfg)
+        assert "--container-image" in srun_args
+        assert "nvcr.io/nvidia/pytorch:23.10-py3" in srun_args
+        assert "--container-mounts" not in srun_args
+
+    def test_srun_args_does_not_include_mail_flags(self):
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(
                 job_name="mail_test",
@@ -459,94 +470,16 @@ class TestBuildSbatchContent:
                 mail_type="END,FAIL",
             ),
         )
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo hello",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "#SBATCH --mail-user=user@example.com" in content
-        assert "#SBATCH --mail-type=END,FAIL" in content
+        srun_args = _build_srun_args(deploy_cfg)
+        assert "--mail-user" not in srun_args
+        assert "--mail-type" not in srun_args
 
-    def test_sbatch_no_mail_directives_when_unset(self, tmp_path):
-        deploy_cfg = _sample_deployment_config()
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo hello",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "#SBATCH --mail-user" not in content
-        assert "#SBATCH --mail-type" not in content
-
-    def test_sbatch_includes_srun_call(self, tmp_path):
-        deploy_cfg = _sample_deployment_config()
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo hello",
-            mounts_str="/data:/data",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "srun -K" in content
-        assert "--container-image=nvcr.io/nvidia/pytorch:23.10-py3" in content
-        assert "--container-mounts=/data:/data" in content
-
-    def test_sbatch_includes_env_exports(self, tmp_path):
-        deploy_cfg = _sample_deployment_config()
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="export WANDB_API_KEY=\"test123\"",
-            container_script="echo hello",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "export WANDB_API_KEY=\"test123\"" in content
-
-    def test_sbatch_includes_container_script(self, tmp_path):
-        deploy_cfg = _sample_deployment_config()
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo 'running training'",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "echo 'running training'" in content
-
-    def test_output_path_uses_job_name(self, tmp_path):
+    def test_srun_args_includes_env_config_in_script(self):
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(job_name="my_custom_job"),
         )
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo hello",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert "my_custom_job_%j.out" in content
-
-    def test_sbatch_file_path_generated(self, tmp_path):
-        deploy_cfg = _sample_deployment_config()
-        _, sbatch_file = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo hello",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
-        assert sbatch_file.parent == tmp_path
-        assert "train_job_20240101_120000.sbatch" == sbatch_file.name
+        srun_args = _build_srun_args(deploy_cfg)
+        assert "my_custom_job" in srun_args
 
 
 class TestRunPrintConfigLocally:
@@ -593,7 +526,7 @@ class TestRunPrintConfigLocally:
 class TestDispatchSlurmJob:
     """Tests for _dispatch_slurm_job."""
 
-    def test_writes_sbatch_file_and_submits(self, tmp_path):
+    def test_launches_srun_locally(self, tmp_path):
         target_args = ["python", "train.py"]
         deploy_cfg = _sample_deployment_config()
         clean_yaml_str = "training:\n  lr: 0.001\n"
@@ -601,16 +534,22 @@ class TestDispatchSlurmJob:
         original_cwd = os.getcwd()
         try:
             os.chdir(str(tmp_path))
-            with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                 result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        mock_run.assert_called_once()
-        assert "sbatch" == mock_run.call_args[0][0][0]
+        mock_popen.assert_called_once()
+        srun_cmd = mock_popen.call_args[0][0]
+        assert srun_cmd[0] == "srun"
+        assert "--job-name" in srun_cmd
+        assert "train_job" in srun_cmd
+        kwargs = mock_popen.call_args[1]
+        assert kwargs["start_new_session"] is True
+        assert kwargs["env"]["NVIDIA_DRIVER_CAPABILITIES"] == "compute,utility"
 
-    def test_dry_run_outputs_sbatch_content(self, tmp_path, capsys):
+    def test_dry_run_outputs_srun_command(self, tmp_path, capsys):
         target_args = ["python", "train.py"]
         deploy_cfg = _sample_deployment_config()
         deploy_cfg.dry_run = True
@@ -619,16 +558,19 @@ class TestDispatchSlurmJob:
         original_cwd = os.getcwd()
         try:
             os.chdir(str(tmp_path))
-            with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
+            with patch("jsonargparse_slurm.cli.subprocess.Popen"):
                 result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        mock_run.assert_not_called()
         stdout = capsys.readouterr().out
-        assert "#SBATCH --job-name=train_job" in stdout
-        assert "srun -K" in stdout
+        assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility" in stdout
+        assert "srun" in stdout
+        assert "--job-name" in stdout
+        assert "train_job" in stdout
+        assert "--partition" in stdout
+        assert "gpu" in stdout
 
     def test_dry_run_false_does_not_print(self, tmp_path, capsys):
         target_args = ["python", "train.py"]
@@ -639,15 +581,15 @@ class TestDispatchSlurmJob:
         original_cwd = os.getcwd()
         try:
             os.chdir(str(tmp_path))
-            with patch("jsonargparse_slurm.cli.subprocess.run"):
+            with patch("jsonargparse_slurm.cli.subprocess.Popen"):
                 _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
         finally:
             os.chdir(original_cwd)
 
         stdout = capsys.readouterr().out
-        assert "#SBATCH --job-name=train_job" not in stdout
+        assert "--job-name" not in stdout
 
-    def test_sbatch_file_contains_clean_yaml(self, tmp_path):
+    def test_srun_script_contains_clean_yaml(self, tmp_path):
         target_args = ["python", "train.py"]
         deploy_cfg = _sample_deployment_config()
         clean_yaml_str = "training:\n  lr: 0.001\n"
@@ -655,25 +597,48 @@ class TestDispatchSlurmJob:
         original_cwd = os.getcwd()
         try:
             os.chdir(str(tmp_path))
-            with patch("jsonargparse_slurm.cli.subprocess.run"):
-                with patch("builtins.open", create=True) as mock_open_fn:
-                    mock_file = MagicMock()
-                    mock_open_fn.return_value.__enter__.return_value = mock_file
-                    result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
+                result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        mock_file.write.assert_called_once()
-        written_sbatch = mock_file.write.call_args[0][0]
-        assert "clean_config_$$.yaml" in written_sbatch
-        assert "training:\n  lr: 0.001" in written_sbatch
+        srun_cmd = mock_popen.call_args[0][0]
+        script_arg = srun_cmd[srun_cmd.index("-c") + 1]
+        assert "clean_config_$$.yaml" in script_arg
+        assert "training:\n  lr: 0.001" in script_arg
+        assert "NVIDIA_DRIVER_CAPABILITIES" not in script_arg
+
+    def test_nvidia_capabilities_filtered_from_script(self, tmp_path):
+        target_args = ["python", "train.py"]
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(job_name="gpu_job"),
+            container=ContainerConfig(
+                image="test:latest",
+                env={"NVIDIA_DRIVER_CAPABILITIES": "graphics,compute"},
+            ),
+        )
+        clean_yaml_str = ""
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
+                _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
+
+        srun_cmd = mock_popen.call_args[0][0]
+        script_arg = srun_cmd[srun_cmd.index("-c") + 1]
+        assert "NVIDIA_DRIVER_CAPABILITIES" not in script_arg
+        kwargs = mock_popen.call_args[1]
+        assert kwargs["env"]["NVIDIA_DRIVER_CAPABILITIES"] == "compute,utility"
 
 
 class TestDispatchSlurmJobSsh:
     """Tests for _dispatch_slurm_job with ssh_remote set."""
 
-    def test_pipes_sbatch_via_ssh(self, tmp_path):
+    def test_launches_srun_via_ssh_background(self, tmp_path):
         target_args = ["python", "train.py"]
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(
@@ -690,12 +655,17 @@ class TestDispatchSlurmJobSsh:
         assert result == 0
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        assert call_args == ["ssh", "user@login.cluster.edu", "sbatch"]
-        call_kwargs = mock_run.call_args[1]
-        assert "input" in call_kwargs
-        assert "#SBATCH --job-name=ssh_job" in call_kwargs["input"]
+        assert call_args[0] == "ssh"
+        assert call_args[1] == "user@login.cluster.edu"
+        remote_cmd = call_args[2]
+        assert "nohup" in remote_cmd
+        assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility" in remote_cmd
+        assert "srun" in remote_cmd
+        assert "--job-name" in remote_cmd
+        assert "ssh_job" in remote_cmd
+        assert "2>&1 &" in remote_cmd
 
-    def test_ssh_does_not_write_local_sbatch_file(self, tmp_path):
+    def test_ssh_does_not_use_local_popen(self, tmp_path):
         target_args = ["python", "train.py"]
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(
@@ -707,11 +677,11 @@ class TestDispatchSlurmJobSsh:
         clean_yaml_str = "training:\n  lr: 0.001\n"
 
         with patch("jsonargparse_slurm.cli.subprocess.run"):
-            with patch("builtins.open") as mock_open:
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                 result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
         assert result == 0
-        mock_open.assert_not_called()
+        mock_popen.assert_not_called()
 
     def test_ssh_includes_netrc_mount_when_not_found_locally(self, tmp_path):
         target_args = ["python", "train.py"]
@@ -723,7 +693,7 @@ class TestDispatchSlurmJobSsh:
             container=ContainerConfig(
                 image="img:latest",
                 mount_netrc=True,
-                netrc_host_path="~/.netrc",
+                netrc_host_path="/home/remote/.netrc",
                 netrc_container_path="/root/.netrc",
             ),
         )
@@ -732,8 +702,8 @@ class TestDispatchSlurmJobSsh:
         with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
             _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
-        sbatch_content = mock_run.call_args[1]["input"]
-        assert "~/.netrc:/root/.netrc" in sbatch_content
+        remote_cmd = mock_run.call_args[0][0][2]
+        assert "/home/remote/.netrc:/root/.netrc" in remote_cmd
 
 
 class TestMain:
@@ -766,7 +736,7 @@ class TestMain:
         assert "job_name: train_job" in stdout
         assert "partition: gpu" in stdout
 
-    def test_dispatch_flow_generates_sbatch(self, tmp_path):
+    def test_dispatch_flow_launches_srun(self, tmp_path):
         config_path = self._write_config(tmp_path, _sample_yaml())
 
         original_cwd = os.getcwd()
@@ -777,16 +747,17 @@ class TestMain:
                 "--config", config_path,
                 "python", "train.py",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/train_job_*.sbatch"))
-        assert len(generated) == 1
-        content = generated[0].read_text()
-        assert "#SBATCH --job-name=train_job" in content
+        mock_popen.assert_called_once()
+        srun_cmd = mock_popen.call_args[0][0]
+        assert srun_cmd[0] == "srun"
+        assert "--job-name" in srun_cmd
+        assert "train_job" in srun_cmd
 
     def test_no_wrapper_keys_uses_defaults(self, tmp_path):
         yaml_data = {"training": {"lr": 0.001}}
@@ -800,14 +771,14 @@ class TestMain:
                 "--config", config_path,
                 "python", "train.py",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("jsap_job_*.sbatch"))
-        assert len(generated) == 1
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "jsap_job" in srun_cmd
 
     def test_missing_config_file_errors(self, tmp_path):
         config_path = str(tmp_path / "nonexistent.yaml")
@@ -835,17 +806,16 @@ class TestMain:
                 "--integrator.min_points", "10",
                 "--model.arch", "resnet50",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/train_job_*.sbatch"))
-        assert len(generated) == 1
-        content = generated[0].read_text()
-        assert "--integrator.min_points" in content
-        assert "resnet50" in content
+        srun_cmd = mock_popen.call_args[0][0]
+        script_arg = srun_cmd[srun_cmd.index("-c") + 1]
+        assert "--integrator.min_points" in script_arg
+        assert "resnet50" in script_arg
 
     def test_deployment_cli_overrides_applied(self, tmp_path):
         config_path = self._write_config(tmp_path, _sample_yaml())
@@ -859,16 +829,14 @@ class TestMain:
                 "--config", config_path,
                 "python", "train.py",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/override_job_*.sbatch"))
-        assert len(generated) == 1
-        content = generated[0].read_text()
-        assert "#SBATCH --job-name=override_job" in content
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "override_job" in srun_cmd
 
     def test_deployment_equals_form_cli_override(self, tmp_path):
         config_path = self._write_config(tmp_path, _sample_yaml())
@@ -882,17 +850,14 @@ class TestMain:
                 "--config", config_path,
                 "python", "train.py",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("logs/override_job_*.sbatch"))
-        assert len(generated) == 1
-        content = generated[0].read_text()
-        assert "#SBATCH --job-name=override_job" in content
-
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "override_job" in srun_cmd
 
     def test_nothing_passed_uses_all_defaults(self, tmp_path):
         original_cwd = os.getcwd()
@@ -902,16 +867,14 @@ class TestMain:
                 "jsap-slurm",
                 "python", "train.py",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("jsap_job_*.sbatch"))
-        assert len(generated) == 1
-        content2 = generated[0].read_text()
-        assert "#SBATCH --job-name=jsap_job" in content2
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "jsap_job" in srun_cmd
 
     def test_only_cli_overrides_no_yaml(self, tmp_path):
         original_cwd = os.getcwd()
@@ -923,17 +886,15 @@ class TestMain:
                 "--slurm.partition", "debug",
                 "python", "train.py",
             ]):
-                with patch("jsonargparse_slurm.cli.subprocess.run"):
+                with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
                     result = main()
         finally:
             os.chdir(original_cwd)
 
         assert result == 0
-        generated = list(tmp_path.glob("cli_only_job_*.sbatch"))
-        assert len(generated) == 1
-        content3 = generated[0].read_text()
-        assert "#SBATCH --job-name=cli_only_job" in content3
-        assert "#SBATCH --partition=debug" in content3
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "cli_only_job" in srun_cmd
+        assert "debug" in srun_cmd
 
 
 class TestYamlCleaning:
@@ -947,28 +908,23 @@ class TestYamlCleaning:
         original_cwd = os.getcwd()
         try:
             os.chdir(str(tmp_path))
-            with patch("jsonargparse_slurm.cli.subprocess.run"):
-                with patch("builtins.open", create=True) as mock_open_fn:
-                    mock_file = MagicMock()
-                    mock_open_fn.return_value.__enter__.return_value = mock_file
-                    _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
+                _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
         finally:
             os.chdir(original_cwd)
 
-        written_sbatch = mock_file.write.call_args[0][0]
-        heredoc_start = written_sbatch.find("cat << 'EOF_CONFIG'")
-        heredoc_end = written_sbatch.find("EOF_CONFIG", heredoc_start)
-        heredoc_content = written_sbatch[heredoc_start:heredoc_end]
-        assert "slurm" not in heredoc_content
-        assert "container" not in heredoc_content
-        assert "lr: 0.001" in written_sbatch
-        assert "path: /data/dataset" in written_sbatch
+        srun_cmd = mock_popen.call_args[0][0]
+        script_arg = srun_cmd[srun_cmd.index("-c") + 1]
+        assert "slurm" not in script_arg
+        assert "container" not in script_arg
+        assert "lr: 0.001" in script_arg
+        assert "path: /data/dataset" in script_arg
 
 
-class TestNetrcMountingInSbatch:
-    """Tests for .netrc mounting in generated SBATCH output."""
+class TestNetrcMountingInSrun:
+    """Tests for .netrc mounting in the srun command."""
 
-    def test_netrc_mount_in_sbatch_when_enabled(self, tmp_path):
+    def test_netrc_mount_resolved_and_in_dispatch(self, tmp_path):
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(job_name="netrc_test"),
             container=ContainerConfig(
@@ -979,32 +935,35 @@ class TestNetrcMountingInSbatch:
             ),
         )
 
-        with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
-            with patch.object(Path, "exists", return_value=True):
-                content, _ = _build_sbatch_content(
-                        deploy_cfg,
-                        env_exports="",
-                        container_script="echo test",
-                        mounts_str="/home/user/.netrc:/root/.netrc",
-                        log_dir=tmp_path,
-                        timestamp="20240101_120000",
-                    )
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
+                with patch.object(Path, "exists", return_value=True):
+                    with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
+                        _dispatch_slurm_job([], deploy_cfg, "")
+        finally:
+            os.chdir(original_cwd)
 
-        assert "/home/user/.netrc:/root/.netrc" in content
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "--container-mounts" in srun_cmd
+        assert "/home/user/.netrc:/root/.netrc" in srun_cmd
 
-    def test_netrc_not_in_sbatch_when_disabled(self, tmp_path):
+    def test_netrc_not_mounted_when_disabled(self, tmp_path):
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(job_name="netrc_test"),
             container=ContainerConfig(mount_netrc=False),
         )
 
-        content, _ = _build_sbatch_content(
-            deploy_cfg,
-            env_exports="",
-            container_script="echo test",
-            mounts_str="",
-            log_dir=tmp_path,
-            timestamp="20240101_120000",
-        )
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
+                _dispatch_slurm_job([], deploy_cfg, "")
+        finally:
+            os.chdir(original_cwd)
 
-        assert ".netrc" not in content
+        srun_cmd = mock_popen.call_args[0][0]
+        mounts_idx = srun_cmd.index("--container-mounts") if "--container-mounts" in srun_cmd else -1
+        if mounts_idx >= 0:
+            assert ".netrc" not in srun_cmd[mounts_idx + 1]

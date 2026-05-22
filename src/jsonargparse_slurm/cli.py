@@ -9,7 +9,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import yaml
 from jsonargparse import auto_parser, ArgumentParser
@@ -34,7 +34,7 @@ def setup_cluster(
         slurm: SLURM resource allocation settings.
         container: Container image and runtime settings.
         repos: Git repositories to clone inside the container.
-        dry_run: If True, print the full SBATCH script to stdout and exit.
+        dry_run: If True, print the full srun command to stdout and exit.
 
     Returns:
         Consolidated :class:`DeploymentConfig`.
@@ -87,7 +87,7 @@ def split_by_signature(
         arg = cli_args[i]
         is_wrapper_arg = False
         for key in known_keys:
-            if arg == f"--{key}" or arg.startswith(f"--{key}."):
+            if arg == f"--{key}" or arg.startswith(f"--{key}.") or arg.startswith(f"--{key}="):
                 is_wrapper_arg = True
                 break
         if arg in ("--config", "-c", "--print_config"):
@@ -95,9 +95,14 @@ def split_by_signature(
 
         if is_wrapper_arg:
             wrapper_args.append(arg)
-            if "=" not in arg and i + 1 < len(cli_args) and not cli_args[i + 1].startswith("-"):
-                wrapper_args.append(cli_args[i + 1])
-                i += 1
+            if "=" not in arg and i + 1 < len(cli_args):
+                next_arg = cli_args[i + 1]
+                # --config/-c always consume the next token as their value,
+                # even if it starts with "-" (e.g. "--config -" = read from stdin).
+                # Other wrapper args skip values that look like flags.
+                if arg in ("--config", "-c") or not next_arg.startswith("-"):
+                    wrapper_args.append(next_arg)
+                    i += 1
         else:
             target_args.append(arg)
         i += 1
@@ -222,68 +227,39 @@ rm /tmp/clean_config_$$.yaml
 """
 
 
-def _build_sbatch_content(
+def _build_srun_args(
     deploy_cfg: DeploymentConfig,
-    env_exports: str,
-    container_script: str,
-    mounts_str: str,
-    log_dir: Optional[Path],
-    timestamp: str,
-) -> Tuple[str, Optional[Path]]:
-    """Build the SBATCH submission script content and return it with its file path.
+) -> List[str]:
+    """Build the srun command arguments including all SLURM resource flags.
 
     Args:
         deploy_cfg: The parsed deployment configuration.
-        env_exports: Shell ``export`` statements for container environment.
-        container_script: The inline container bash script.
-        mounts_str: Comma-separated container mount specifications.
-        log_dir: Directory for SLURM output logs. If ``None``, no
-            ``#SBATCH --output`` directive is emitted.
-        timestamp: Timestamp string for the sbatch filename.
 
     Returns:
-        Tuple of (sbatch script content as string, optional Path to the sbatch file).
-        The sbatch file path is ``None`` when ``log_dir`` is ``None``.
+        List of srun command arguments.
     """
-    output_directive = ""
-    sbatch_file: Optional[Path] = None
-    if log_dir is not None:
-        log_file = log_dir / f"{deploy_cfg.slurm.job_name}_%j.out"
-        output_directive = f"#SBATCH --output={log_file}"
-        sbatch_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
+    return [
+        "srun",
+        "--overlap", "-K",
+        "--job-name", deploy_cfg.slurm.job_name,
+        "--partition", deploy_cfg.slurm.partition,
+        "--time", deploy_cfg.slurm.time,
+        "--nodes", str(deploy_cfg.slurm.nodes),
+        "--ntasks", str(deploy_cfg.slurm.ntasks),
+        "--gpus-per-task", str(deploy_cfg.slurm.gpus_per_task),
+        "--cpus-per-task", str(deploy_cfg.slurm.cpus_per_task),
+        "--mem", deploy_cfg.slurm.mem,
+        "--gpu-bind", deploy_cfg.slurm.gpu_bind,
+        "--container-image", deploy_cfg.container.image,
+    ]
 
-    mail_directives = ""
-    if deploy_cfg.slurm.mail_user:
-        mail_directives += f"#SBATCH --mail-user={deploy_cfg.slurm.mail_user}\n"
-    if deploy_cfg.slurm.mail_type:
-        mail_directives += f"#SBATCH --mail-type={deploy_cfg.slurm.mail_type}\n"
-    mail_directives = mail_directives.rstrip("\n")
 
-    content = f"""#!/bin/bash
-#SBATCH --job-name={deploy_cfg.slurm.job_name}
-{output_directive}
-#SBATCH --partition={deploy_cfg.slurm.partition}
-#SBATCH --time={deploy_cfg.slurm.time}
-#SBATCH --nodes={deploy_cfg.slurm.nodes}
-#SBATCH --ntasks={deploy_cfg.slurm.ntasks}
-#SBATCH --gpus-per-task={deploy_cfg.slurm.gpus_per_task}
-#SBATCH --cpus-per-task={deploy_cfg.slurm.cpus_per_task}
-#SBATCH --mem={deploy_cfg.slurm.mem}
-#SBATCH --gpu-bind={deploy_cfg.slurm.gpu_bind}
-{mail_directives}
-{env_exports}
+def _expand_mounts(mounts: List[str]) -> str:
+    """Expand environment variables like ``$HOME`` in mount paths.
 
-CONTAINER_CMD=$(cat << 'EOF'
-{container_script}
-EOF
-)
-
-srun -K \\
-     --container-image={deploy_cfg.container.image} \\
-     --container-mounts={mounts_str} \\
-     /bin/bash -c "$CONTAINER_CMD"
-"""
-    return content, sbatch_file
+    Used for local execution where the shell won't expand variables.
+    """
+    return ",".join(os.path.expandvars(m) for m in mounts)
 
 
 def _resolve_mounts(
@@ -312,6 +288,8 @@ def _resolve_mounts(
                     "not found on host."
                 )
                 return mounts
+        if host_netrc_path.startswith("~/"):
+            host_netrc_path = "$HOME/" + host_netrc_path[2:]
         mounts.append(
             f"{host_netrc_path}:{container_cfg.netrc_container_path}"
         )
@@ -356,11 +334,10 @@ def _dispatch_slurm_job(
     deploy_cfg: DeploymentConfig,
     clean_yaml_str: str,
 ) -> int:
-    """Generate the SBATCH script and submit it to SLURM.
+    """Run the target script directly via ``srun`` (no sbatch).
 
-    If ``deploy_cfg.slurm.ssh_remote`` is set, pipes the sbatch script to the
-    remote host via SSH instead of writing a local file and calling ``sbatch``
-    directly.
+    If ``deploy_cfg.slurm.ssh_remote`` is set, the srun command is launched
+    via SSH as a background job so the SSH connection is not blocked.
 
     Args:
         target_args: The target command arguments.
@@ -377,7 +354,11 @@ def _dispatch_slurm_job(
     mounts_str = ",".join(mounts)
 
     repo_setup = _build_repo_setup_script(deploy_cfg.repos)
-    env_exports = _build_env_exports(deploy_cfg.container.env)
+    container_env = {
+        k: v for k, v in deploy_cfg.container.env.items()
+        if k != "NVIDIA_DRIVER_CAPABILITIES"
+    }
+    env_exports = _build_env_exports(container_env)
     target_cmd_str = shlex.join(target_args)
 
     container_script = _build_container_script(
@@ -385,34 +366,54 @@ def _dispatch_slurm_job(
         workspace=deploy_cfg.container.workspace,
         run_workspace=deploy_cfg.container.run_workspace,
     )
+    if env_exports:
+        container_script = f"{env_exports}\n{container_script}"
 
-    log_dir: Optional[Path] = None
-    if deploy_cfg.slurm.output_path:
-        log_dir = Path(deploy_cfg.slurm.output_path)
+    srun_args = _build_srun_args(deploy_cfg)
+    srun_cmd = srun_args + ["/bin/bash", "-c", container_script]
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    sbatch_content, _ = _build_sbatch_content(
-        deploy_cfg, env_exports, container_script, mounts_str, log_dir, timestamp
-    )
     if deploy_cfg.dry_run:
-        print(sbatch_content)
+        if deploy_cfg.slurm.ssh_remote:
+            mounts_part = f"--container-mounts={mounts_str}"
+        else:
+            mounts_part = f"--container-mounts={_expand_mounts(mounts)}"
+        cmd_str = " ".join(shlex.quote(a) for a in srun_cmd)
+        print(f"NVIDIA_DRIVER_CAPABILITIES=compute,utility {cmd_str} {mounts_part}")
         return 0
+
+    log_dir = Path(deploy_cfg.slurm.output_path) if deploy_cfg.slurm.output_path else Path(".")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.log"
 
     if deploy_cfg.slurm.ssh_remote:
+        base_cmd = " ".join(shlex.quote(a) for a in srun_cmd)
+        remote_cmd = (
+            "NVIDIA_DRIVER_CAPABILITIES=compute,utility " +
+            "nohup " +
+            base_cmd +
+            f" --container-mounts={mounts_str}" +
+            " > " + shlex.quote(str(log_file)) +
+            " 2>&1 &"
+        )
         print(f"Submitting via SSH to {deploy_cfg.slurm.ssh_remote}...")
-        ssh_cmd = ["ssh", deploy_cfg.slurm.ssh_remote, "sbatch"]
-        subprocess.run(ssh_cmd, input=sbatch_content, text=True, check=True)
+        ssh_cmd = ["ssh", deploy_cfg.slurm.ssh_remote, remote_cmd]
+        subprocess.run(ssh_cmd, check=True)
         return 0
 
-    if log_dir is not None:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    sbatch_file = (log_dir or Path(".")) / f"{deploy_cfg.slurm.job_name}_{timestamp}.sbatch"
-
-    with open(sbatch_file, "w") as f:
-        f.write(sbatch_content)
-
-    print(f"Deployment generated: {sbatch_file}")
-    subprocess.run(["sbatch", str(sbatch_file)], check=True)
+    srun_cmd = srun_cmd + ["--container-mounts", _expand_mounts(mounts)]
+    print(f"Launching srun job: {deploy_cfg.slurm.job_name}")
+    env = os.environ.copy()
+    env["NVIDIA_DRIVER_CAPABILITIES"] = "compute,utility"
+    with open(log_file, "w") as log_f:
+        subprocess.Popen(
+            srun_cmd,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+        )
     return 0
 
 
