@@ -372,55 +372,82 @@ def _dispatch_slurm_job(
     srun_args = _build_srun_args(deploy_cfg)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = deploy_cfg.slurm.output_path or "."
+    log_file = f"{log_dir}/{deploy_cfg.slurm.job_name}_{timestamp}.log"
+
+    def _build_mounts_arg(expand: bool) -> str:
+        if expand:
+            return f"--container-mounts={_expand_mounts(mounts)}"
+        return f"--container-mounts={mounts_str}"
 
     if deploy_cfg.dry_run:
         base = " ".join(shlex.quote(a) for a in srun_args)
-        if deploy_cfg.slurm.ssh_remote:
-            mounts_part = f"--container-mounts={mounts_str}"
-        else:
-            mounts_part = f"--container-mounts={_expand_mounts(mounts)}"
+        mounts_part = _build_mounts_arg(expand=not deploy_cfg.slurm.ssh_remote)
         script_part = " ".join(shlex.quote(a) for a in ["/bin/bash", "-c", container_script])
-        print(f"NVIDIA_DRIVER_CAPABILITIES=compute,utility {base} {mounts_part} {script_part}")
+        print(" ".join([
+            "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+            base,
+            f"--output={shlex.quote(log_file)}",
+            mounts_part,
+            script_part,
+        ]))
         return 0
-
-    log_dir = Path(deploy_cfg.slurm.output_path) if deploy_cfg.slurm.output_path else Path(".")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{deploy_cfg.slurm.job_name}_{timestamp}.log"
 
     if deploy_cfg.slurm.ssh_remote:
         base = " ".join(shlex.quote(a) for a in srun_args)
         remote_srun = (
-            f"{base} --container-mounts={mounts_str}"
+            f"{base}"
+            f" --output {shlex.quote(log_file)}"
+            f" --container-mounts={mounts_str}"
             f" {shlex.quote('/bin/bash')} {shlex.quote('-c')} {shlex.quote(container_script)}"
         )
-        remote_cmd = (
-            "NVIDIA_DRIVER_CAPABILITIES=compute,utility " +
-            "nohup " +
-            remote_srun +
-            " > " + shlex.quote(str(log_file)) +
-            " 2>&1 &"
-        )
-        print(f"Submitting via SSH to {deploy_cfg.slurm.ssh_remote}...")
-        ssh_cmd = ["ssh", deploy_cfg.slurm.ssh_remote, remote_cmd]
+        status_file = f"/tmp/jsap_{timestamp}.status"
+        if deploy_cfg.slurm.tmux_session:
+            session_name = f"{deploy_cfg.slurm.job_name}_{timestamp}"
+            inner_cmd = (
+                f"NVIDIA_DRIVER_CAPABILITIES=compute,utility "
+                f"mkdir -p {shlex.quote(log_dir)} && "
+                f"{remote_srun} </dev/null "
+                f"2>{shlex.quote(status_file)}"
+            )
+            remote_cmd = (
+                f'setsid -f tmux new-session -d -s {session_name} "{inner_cmd}"; '
+                f'while [ ! -s {shlex.quote(status_file)} ]; do sleep 0.5; done; '
+                f"grep 'job [0-9]' {shlex.quote(status_file)} | head -1; "
+                f'rm -f {shlex.quote(status_file)}'
+            )
+            print(f"Submitting via SSH to {deploy_cfg.slurm.ssh_remote}...")
+            print(f"tmux session: {session_name}")
+        else:
+            remote_cmd = (
+                "NVIDIA_DRIVER_CAPABILITIES=compute,utility " +
+                f"mkdir -p {shlex.quote(log_dir)} && " +
+                "setsid -f " + remote_srun +
+                f" </dev/null >/dev/null 2>{shlex.quote(status_file)}; " +
+                f"while [ ! -s {shlex.quote(status_file)} ]; do sleep 0.5; done; " +
+                f"grep 'job [0-9]' {shlex.quote(status_file)} | head -1; " +
+                f"rm -f {shlex.quote(status_file)}"
+            )
+            print(f"Submitting via SSH to {deploy_cfg.slurm.ssh_remote}...")
+        ssh_cmd = ["ssh", "-t", deploy_cfg.slurm.ssh_remote, remote_cmd]
         subprocess.run(ssh_cmd, check=True)
         return 0
 
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
     srun_cmd = (
         srun_args
+        + ["--output", log_file]
         + ["--container-mounts", _expand_mounts(mounts)]
         + ["/bin/bash", "-c", container_script]
     )
     print(f"Launching srun job: {deploy_cfg.slurm.job_name}")
     env = os.environ.copy()
     env["NVIDIA_DRIVER_CAPABILITIES"] = "compute,utility"
-    with open(log_file, "w") as log_f:
-        subprocess.Popen(
-            srun_cmd,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env=env,
-        )
+    subprocess.Popen(
+        srun_cmd,
+        start_new_session=True,
+        env=env,
+    )
     return 0
 
 

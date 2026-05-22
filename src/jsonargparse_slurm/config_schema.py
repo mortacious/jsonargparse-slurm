@@ -23,6 +23,7 @@ class SlurmConfig:
     mail_user: Optional[str] = None
     mail_type: Optional[str] = None
     ssh_remote: Optional[str] = None
+    tmux_session: bool = False
 
 
 @dataclass

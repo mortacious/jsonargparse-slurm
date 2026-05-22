@@ -656,14 +656,19 @@ class TestDispatchSlurmJobSsh:
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
         assert call_args[0] == "ssh"
-        assert call_args[1] == "user@login.cluster.edu"
-        remote_cmd = call_args[2]
-        assert "nohup" in remote_cmd
+        assert call_args[1] == "-t"
+        assert call_args[2] == "user@login.cluster.edu"
+        remote_cmd = call_args[3]
+        assert "setsid -f" in remote_cmd
         assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility" in remote_cmd
         assert "srun" in remote_cmd
         assert "--job-name" in remote_cmd
         assert "ssh_job" in remote_cmd
-        assert "2>&1 &" in remote_cmd
+        assert "</dev/null" in remote_cmd
+        assert "head -1" in remote_cmd
+        assert "grep" in remote_cmd
+        assert "/tmp/jsap_" in remote_cmd
+        assert "while [ ! -s" in remote_cmd
 
     def test_ssh_does_not_use_local_popen(self, tmp_path):
         target_args = ["python", "train.py"]
@@ -702,8 +707,57 @@ class TestDispatchSlurmJobSsh:
         with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
             _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
-        remote_cmd = mock_run.call_args[0][0][2]
+        remote_cmd = mock_run.call_args[0][0][3]
         assert "/home/remote/.netrc:/root/.netrc" in remote_cmd
+
+    def test_tmux_session_wraps_srun(self, tmp_path):
+        target_args = ["python", "train.py"]
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(
+                job_name="tmux_job",
+                ssh_remote="user@login.cluster.edu",
+                tmux_session=True,
+            ),
+            container=ContainerConfig(image="img:latest"),
+        )
+        clean_yaml_str = ""
+
+        with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
+            result = _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+
+        assert result == 0
+        remote_cmd = mock_run.call_args[0][0][3]
+        assert "tmux new-session -d -s tmux_job_" in remote_cmd
+        assert "setsid -f" in remote_cmd
+        assert "srun" in remote_cmd
+        assert "--job-name" in remote_cmd
+        assert "</dev/null" in remote_cmd
+        assert "head -1" in remote_cmd
+        assert "grep" in remote_cmd
+        assert "/tmp/jsap_" in remote_cmd
+
+    def test_tmux_session_ignored_without_ssh_remote(self, tmp_path):
+        target_args = ["python", "train.py"]
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(
+                job_name="local_job",
+                ssh_remote=None,
+                tmux_session=True,
+            ),
+            container=ContainerConfig(image="img:latest"),
+        )
+        clean_yaml_str = ""
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with patch("jsonargparse_slurm.cli.subprocess.Popen") as mock_popen:
+                _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+        finally:
+            os.chdir(original_cwd)
+
+        srun_cmd = mock_popen.call_args[0][0]
+        assert "tmux" not in srun_cmd
 
 
 class TestMain:
