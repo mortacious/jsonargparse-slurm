@@ -303,16 +303,18 @@ def _resolve_mounts(
     """
     mounts = list(container_cfg.mounts)
     if container_cfg.mount_netrc:
-        host_netrc = Path(container_cfg.netrc_host_path).expanduser().resolve()
-        if check_exists and not host_netrc.exists():
-            print(
-                f"WARNING: mount_netrc is True, but {host_netrc} "
-                "not found on host."
-            )
-        else:
-            mounts.append(
-                f"{host_netrc}:{container_cfg.netrc_container_path}"
-            )
+        host_netrc_path = container_cfg.netrc_host_path
+        if check_exists:
+            expanded = Path(host_netrc_path).expanduser()
+            if not expanded.exists():
+                print(
+                    f"WARNING: mount_netrc is True, but {expanded} "
+                    "not found on host."
+                )
+                return mounts
+        mounts.append(
+            f"{host_netrc_path}:{container_cfg.netrc_container_path}"
+        )
     return mounts
 
 

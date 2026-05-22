@@ -388,9 +388,8 @@ class TestResolveMounts:
             netrc_container_path="/root/.netrc",
         )
         with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
-            with patch.object(Path, "resolve", return_value=Path("/home/user/.netrc")):
-                with patch.object(Path, "exists", return_value=True):
-                    mounts = _resolve_mounts(container_cfg)
+            with patch.object(Path, "exists", return_value=True):
+                mounts = _resolve_mounts(container_cfg)
         assert "/home/user/.netrc:/root/.netrc" in mounts
 
     def test_netrc_not_found_warns(self):
@@ -399,9 +398,8 @@ class TestResolveMounts:
             netrc_host_path="~/.netrc",
         )
         with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
-            with patch.object(Path, "resolve", return_value=Path("/home/user/.netrc")):
-                with patch.object(Path, "exists", return_value=False):
-                    mounts = _resolve_mounts(container_cfg)
+            with patch.object(Path, "exists", return_value=False):
+                mounts = _resolve_mounts(container_cfg)
         assert len(mounts) == 0
 
     def test_netrc_not_found_but_skip_check(self):
@@ -410,10 +408,8 @@ class TestResolveMounts:
             netrc_host_path="/home/remote/.netrc",
             netrc_container_path="/root/.netrc",
         )
-        with patch.object(Path, "expanduser", return_value=Path("/home/remote/.netrc")):
-            with patch.object(Path, "resolve", return_value=Path("/home/remote/.netrc")):
-                with patch.object(Path, "exists", return_value=False):
-                    mounts = _resolve_mounts(container_cfg, check_exists=False)
+        with patch.object(Path, "exists", return_value=False):
+            mounts = _resolve_mounts(container_cfg, check_exists=False)
         assert "/home/remote/.netrc:/root/.netrc" in mounts
 
     def test_netrc_disabled(self):
@@ -734,15 +730,10 @@ class TestDispatchSlurmJobSsh:
         clean_yaml_str = ""
 
         with patch("jsonargparse_slurm.cli.subprocess.run") as mock_run:
-            with patch("jsonargparse_slurm.cli.Path.expanduser",
-                       return_value=Path("/home/user/.netrc")):
-                with patch("jsonargparse_slurm.cli.Path.resolve",
-                           return_value=Path("/home/user/.netrc")):
-                    with patch.object(Path, "exists", return_value=False):
-                        _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
+            _dispatch_slurm_job(target_args, deploy_cfg, clean_yaml_str)
 
         sbatch_content = mock_run.call_args[1]["input"]
-        assert "/home/user/.netrc:/root/.netrc" in sbatch_content
+        assert "~/.netrc:/root/.netrc" in sbatch_content
 
 
 class TestMain:
@@ -989,9 +980,8 @@ class TestNetrcMountingInSbatch:
         )
 
         with patch.object(Path, "expanduser", return_value=Path("/home/user/.netrc")):
-            with patch.object(Path, "resolve", return_value=Path("/home/user/.netrc")):
-                with patch.object(Path, "exists", return_value=True):
-                    content, _ = _build_sbatch_content(
+            with patch.object(Path, "exists", return_value=True):
+                content, _ = _build_sbatch_content(
                         deploy_cfg,
                         env_exports="",
                         container_script="echo test",
