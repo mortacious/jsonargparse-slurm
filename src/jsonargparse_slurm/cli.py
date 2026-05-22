@@ -238,7 +238,7 @@ def _build_srun_args(
     Returns:
         List of srun command arguments.
     """
-    return [
+    args = [
         "srun",
         "--overlap", "-K",
         "--job-name", deploy_cfg.slurm.job_name,
@@ -252,6 +252,11 @@ def _build_srun_args(
         "--gpu-bind", deploy_cfg.slurm.gpu_bind,
         "--container-image", deploy_cfg.container.image,
     ]
+    if deploy_cfg.slurm.mail_user:
+        args += ["--mail-user", deploy_cfg.slurm.mail_user]
+    if deploy_cfg.slurm.mail_type:
+        args += ["--mail-type", deploy_cfg.slurm.mail_type]
+    return args
 
 
 def _expand_mounts(mounts: List[str]) -> str:

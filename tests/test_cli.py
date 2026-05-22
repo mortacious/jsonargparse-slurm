@@ -462,13 +462,23 @@ class TestBuildSrunArgs:
         assert "nvcr.io/nvidia/pytorch:23.10-py3" in srun_args
         assert "--container-mounts" not in srun_args
 
-    def test_srun_args_does_not_include_mail_flags(self):
+    def test_srun_args_includes_mail_flags_when_set(self):
         deploy_cfg = DeploymentConfig(
             slurm=SlurmConfig(
                 job_name="mail_test",
                 mail_user="user@example.com",
                 mail_type="END,FAIL",
             ),
+        )
+        srun_args = _build_srun_args(deploy_cfg)
+        assert "--mail-user" in srun_args
+        assert "user@example.com" in srun_args
+        assert "--mail-type" in srun_args
+        assert "END,FAIL" in srun_args
+
+    def test_srun_args_omits_mail_flags_when_unset(self):
+        deploy_cfg = DeploymentConfig(
+            slurm=SlurmConfig(job_name="no_mail_test"),
         )
         srun_args = _build_srun_args(deploy_cfg)
         assert "--mail-user" not in srun_args
